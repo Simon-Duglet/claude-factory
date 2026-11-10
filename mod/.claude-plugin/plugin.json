@@ -1,0 +1,6 @@
+{
+  "name": "team-factory",
+  "version": "0.1.0",
+  "description": "Injects the Claude Factory team prompt at session start and reports spawned agents back to the Claude Factory app",
+  "author": { "name": "Simon Duguay-Létourneau" }
+}

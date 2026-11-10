@@ -1,0 +1,10 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Claude Factory
+Comment=Design and run Claude Code agent teams
+Exec=claude-factory
+Icon=claude-factory
+StartupWMClass=claude-factory
+Categories=Development;
+Terminal=false

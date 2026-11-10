@@ -1,0 +1,25 @@
+[package]
+name = "claude-factory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Desktop app for designing and running Claude Code agent teams"
+license = "MIT"
+repository = "https://github.com/Simon-Duglet/claude-factory"
+
+[dependencies]
+dirs = "7.0.0"
+bevy = { version = "0.19", default-features = false, features = ["2d"] }
+bevy_egui = "0.42"
+# Already in bevy's tree; used directly for the window icon.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Already in bevy_egui's tree; reads pasted images and copied files, which egui only sees as text.
+# wayland-data-control: without it arboard reads the XWayland clipboard, which KWin only syncs while an X11 window has focus.
+arboard = { version = "3.7", features = ["wayland-data-control"] }
+winit = { version = "0.30", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# Grabs agents' nested Xephyr desktops for the team view thumbnails.
+x11rb = "0.14"
+# Already in the tree; process groups, signals and PR_SET_PDEATHSIG for agent cleanup.
+libc = "0.2"

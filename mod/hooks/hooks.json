@@ -1,0 +1,17 @@
+{
+  "description": "Claude Factory team prompt and agent tracking",
+  "modules": ["./register.js"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(command -v claude-factory || echo \"$HOME/.cargo/bin/claude-factory\")\" session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
