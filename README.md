@@ -81,6 +81,12 @@ The prompt goes through a settings hook rather than the mod's `prompt.context` e
 Rebuild with `cargo install --path .` after changing the prompt template (`src/prompt.rs`), since the hook runs
 the installed binary.
 
+## Recommended
+
+- [nested-desktop-mcp](https://github.com/Simon-Duglet/nested-desktop-mcp): an MCP server that gives each agent its
+  own nested Xephyr desktop to drive without touching your mouse or keyboard. Claude Factory gives every agent its own
+  display and shows a live thumbnail of it under the agent's node.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
