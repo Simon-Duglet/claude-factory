@@ -4,7 +4,9 @@ use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use crate::runner::THUMB_WIDTH;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
@@ -264,12 +266,16 @@ fn sync_nodes(
                         continue;
                     };
                     let size = Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 };
-                    let image =
+                    let mut image =
                         Image::new(size, TextureDimension::D2, t.rgba.clone(), TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+                    image.sampler = ImageSampler::linear();
                     // The old snapshot is freed when its last handle goes.
                     sprite.image = images.add(image);
+                    // Captured larger than shown; draw it at the preview's intended size.
+                    let shown = Vec2::new(THUMB_WIDTH as f32, THUMB_WIDTH as f32 * t.height as f32 / t.width as f32);
+                    sprite.custom_size = Some(shown);
                     let radius = if spec.is_lead { LEAD_RADIUS } else { RADIUS };
-                    transform.translation.y = -radius - 54.0 - t.height as f32 / 2.0;
+                    transform.translation.y = -radius - 54.0 - shown.y / 2.0;
                     *visibility = Visibility::Inherited;
                 }
             }

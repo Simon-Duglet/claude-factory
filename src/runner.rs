@@ -53,7 +53,10 @@ pub struct Thumbnail {
     pub rgba: Vec<u8>,
 }
 
-const THUMB_WIDTH: u32 = 160;
+/// The preview's width on screen, in world units.
+pub const THUMB_WIDTH: u32 = 160;
+/// Captured at this multiple of the shown size so it stays sharp when zoomed in and on HiDPI.
+const THUMB_OVERSAMPLE: u32 = 2;
 
 #[derive(Default)]
 struct Shared {
@@ -450,15 +453,16 @@ fn grab(display: &str) -> Option<Thumbnail> {
     if w == 0 || img.data.len() != (w * h * 4) as usize {
         return None;
     }
-    // Nearest-neighbour downscale: plenty for a thumbnail.
-    let (tw, th) = (THUMB_WIDTH, (THUMB_WIDTH * h / w).max(1));
-    let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
-    for y in 0..th {
-        for x in 0..tw {
-            let i = (((y * h / th) * w + x * w / tw) * 4) as usize;
-            rgba.extend_from_slice(&[img.data[i + 2], img.data[i + 1], img.data[i], 255]);
-        }
+    // BGRX to RGBA in place, then an area-averaging downscale (sharp text, no nearest-neighbour blocks).
+    let mut data = img.data;
+    for px in data.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        px[3] = 255;
     }
+    let full = image::RgbaImage::from_raw(w, h, data)?;
+    let tw = (THUMB_WIDTH * THUMB_OVERSAMPLE).min(w);
+    let th = (tw * h / w).max(1);
+    let rgba = image::imageops::thumbnail(&full, tw, th).into_raw();
     Some(Thumbnail { width: tw, height: th, rgba })
 }
 
