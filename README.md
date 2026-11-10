@@ -62,7 +62,9 @@ Open the **Chat** tab (or click an agent in the team view) and press **Start tea
 - Every agent of a team shares one Claude Code task list (`CLAUDE_CODE_TASK_LIST_ID=claude-factory-<team>`, stored
   in `~/.claude/tasks/`). The lead plans the work there, with an owner per task and QA blocked on the developer, and
   teammates mark their task in progress and completed. **Clear** in the task panel empties the list.
-- **Stop team**, or closing the app, ends every session. Conversations are not kept across restarts.
+- **Stop team**, or closing the app, ends every session. **🕘 History** (next to the agent tabs) lists that agent's
+  past conversations from Claude Code's transcripts (`~/.claude/projects/…/<session>.jsonl`): click one to read it,
+  then **Reopen** to restart the agent on it with `--resume`, its earlier messages shown above.
 
 Agent names must be unique among the Claude sessions running on this machine, since teammates address each other
 by name.

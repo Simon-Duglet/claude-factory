@@ -66,6 +66,8 @@ struct Shared {
     outbox: Vec<(String, String)>,
     /// Slash commands (skills included) the session accepts, as (name, description).
     commands: Vec<(String, String)>,
+    /// Claude's id for this conversation, from the first event that carries it.
+    session_id: Option<String>,
 }
 
 pub struct Launch<'a> {
@@ -76,6 +78,8 @@ pub struct Launch<'a> {
     pub system_prompt: String,
     /// Shared by every agent of the team, so the lead's tasks are the ones teammates update.
     pub task_list_id: &'a str,
+    /// Continue this past session (`--resume`) instead of starting a new one.
+    pub resume: Option<&'a str>,
 }
 
 /// One teammate: a long-lived `claude -p` session the app talks to over stream-json.
@@ -108,6 +112,9 @@ impl Agent {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(id) = launch.resume {
+            cmd.args(["--resume", id]);
+        }
         if !launch.model.trim().is_empty() {
             cmd.args(["--model", launch.model.trim()]);
         }
@@ -187,6 +194,26 @@ impl Agent {
     /// The latest snapshot of the agent's nested desktop, while it has one and the grab works.
     pub fn thumbnail(&self) -> Option<Arc<Thumbnail>> {
         self.shared.lock().unwrap().thumbnail.clone()
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.shared.lock().unwrap().session_id.clone()
+    }
+
+    /// The first message the agent got, typed or from a teammate, as (from, text); `from` is None for the user.
+    pub fn first_message(&self) -> Option<(Option<String>, String)> {
+        self.shared.lock().unwrap().entries.iter().find_map(|e| match e {
+            Entry::User(t) => Some((None, t.clone())),
+            Entry::Incoming { from, text } => Some((Some(from.clone()), text.clone())),
+            _ => None,
+        })
+    }
+
+    /// Puts a resumed session's earlier conversation above what the agent says from now on.
+    pub fn preload(&self, earlier: Vec<Entry>) {
+        let mut shared = self.shared.lock().unwrap();
+        let later = std::mem::replace(&mut shared.entries, earlier);
+        shared.entries.extend(later);
     }
 
     pub fn commands(&self) -> Vec<(String, String)> {
@@ -330,6 +357,9 @@ fn apply(shared: &mut Shared, event: &Value) {
     if shared.status == Some(Status::Starting) {
         shared.status = Some(Status::Idle);
     }
+    if let Some(id) = event["session_id"].as_str() {
+        shared.session_id = Some(id.into());
+    }
     match (event["type"].as_str(), event["subtype"].as_str()) {
         (Some("command_lifecycle"), _) => match event["state"].as_str() {
             Some("started") => shared.status = Some(Status::Working),
@@ -432,7 +462,7 @@ fn grab(display: &str) -> Option<Thumbnail> {
     Some(Thumbnail { width: tw, height: th, rgba })
 }
 
-fn tool_summary(block: &Value) -> String {
+pub fn tool_summary(block: &Value) -> String {
     let name = block["name"].as_str().unwrap_or("tool");
     let input = &block["input"];
     let detail = ["command", "file_path", "to", "pattern", "query", "description", "url"]
@@ -450,8 +480,9 @@ mod tests {
     #[test]
     fn tracks_turns_and_messages() {
         let mut s = Shared { status: Some(Status::Starting), ..Default::default() };
-        apply(&mut s, &json!({"type":"system","subtype":"hook_started"}));
+        apply(&mut s, &json!({"type":"system","subtype":"hook_started","session_id":"abc"}));
         assert!(s.status == Some(Status::Idle));
+        assert_eq!(s.session_id.as_deref(), Some("abc"));
         apply(&mut s, &json!({"type":"control_response","response":{"subtype":"success","request_id":"init",
             "response":{"commands":[{"name":"simplify","description":"Clean up code","argumentHint":""}]}}}));
         assert_eq!(s.commands, [("simplify".to_string(), "Clean up code".to_string())]);

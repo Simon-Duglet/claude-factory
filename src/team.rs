@@ -101,11 +101,26 @@ pub struct Store {
     /// Live thumbnails of the agents' nested desktops in the team view; off means no screenshots at all.
     #[serde(default = "yes")]
     pub desktop_preview: bool,
+    /// Sessions the app ran, so the History view can list them by team and agent.
+    #[serde(default)]
+    pub history: Vec<PastSession>,
+}
+
+/// One conversation an agent had; its transcript is Claude Code's `<id>.jsonl`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PastSession {
+    pub team: String,
+    pub agent: String,
+    pub id: String,
+    /// Unix seconds.
+    pub started_at: i64,
+    /// The first message, on one line.
+    pub preview: String,
 }
 
 impl Default for Store {
     fn default() -> Self {
-        Self { teams: Vec::new(), desktop_preview: true }
+        Self { teams: Vec::new(), desktop_preview: true, history: Vec::new() }
     }
 }
 

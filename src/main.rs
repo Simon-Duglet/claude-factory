@@ -1,4 +1,5 @@
 mod attach;
+mod history;
 mod live;
 mod prompt;
 mod runner;
@@ -18,7 +19,7 @@ use runner::{Agent, Entry, Status};
 use scene::{NodeSpec, NodeState, SceneCamera, SceneInput, SceneOutput};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use team::{Member, Role, Store, Team};
+use team::{Member, PastSession, Role, Store, Team};
 
 /// Agents the app is running, keyed by (team name, member name).
 type Running = HashMap<(String, String), Agent>;
@@ -119,6 +120,17 @@ struct Factory {
     copied: Option<Member>,
     /// The node the scene's context menu was opened on; None on empty canvas.
     menu_on: Option<String>,
+    history: HistoryView,
+}
+
+/// The chat panel's History mode: an agent's past conversations, and the one being read.
+#[derive(Default)]
+struct HistoryView {
+    open: bool,
+    /// The (team, agent) `list` was built for; None rebuilds it.
+    for_key: Option<(String, String)>,
+    list: Vec<history::Summary>,
+    viewing: Option<(history::Summary, Vec<Entry>)>,
 }
 
 impl Factory {
@@ -144,6 +156,7 @@ impl Factory {
             attachments: Vec::new(),
             copied: None,
             menu_on: None,
+            history: HistoryView::default(),
         }
     }
 
@@ -170,7 +183,30 @@ impl Factory {
                     *owner = untag(owner, tag);
                 }
             }
+            self.record_sessions();
             self.last_poll = Instant::now();
+        }
+    }
+
+    /// Saves each running agent's session to the store's history, with its first message once it has one.
+    fn record_sessions(&mut self) {
+        for ((team, name), agent) in &self.running {
+            let Some(id) = agent.session_id() else { continue };
+            let i = self.store.history.iter().position(|h| h.id == id).unwrap_or_else(|| {
+                let started_at = history::now();
+                self.store.history.push(PastSession { team: team.clone(), agent: name.clone(), id, started_at, preview: String::new() });
+                self.store.history.len() - 1
+            });
+            let past = &mut self.store.history[i];
+            if past.preview.is_empty()
+                && let Some((from, text)) = agent.first_message()
+            {
+                let first = match from {
+                    Some(from) => format!("From {}: {text}", history::untag(&from)),
+                    None => text,
+                };
+                past.preview = history::preview(&first);
+            }
         }
     }
 }
@@ -391,7 +427,10 @@ fn details_panel(ui: &mut egui::Ui, f: &mut Factory, messages: &mut Vec<(String,
                 prompt_preview(ui, team);
             });
         }
-        View::Chat => chat_view(ui, team, &mut f.running, &mut f.tags, &mut f.chat_with, &mut f.draft, &mut f.attachments, messages),
+        View::Chat => {
+            let chat = Chat { running: &mut f.running, tags: &mut f.tags, chat_with: &mut f.chat_with, draft: &mut f.draft, attachments: &mut f.attachments };
+            chat_view(ui, team, chat, &mut f.history, &f.store.history, messages)
+        }
     }
     if export && let Some(path) = pick_file(true, &format!("{}.json", f.store.teams[f.selected].name)) {
         f.status = match Store::export(&f.store.teams[f.selected], &path) {
@@ -754,16 +793,17 @@ fn prompt_preview(ui: &mut egui::Ui, team: &Team) {
     ui.add(egui::TextEdit::multiline(&mut text).code_editor().interactive(false).desired_width(f32::INFINITY));
 }
 
-fn chat_view(
-    ui: &mut egui::Ui,
-    team: &mut Team,
-    running: &mut Running,
-    tags: &mut HashMap<String, String>,
-    chat_with: &mut String,
-    draft: &mut String,
-    attachments: &mut Vec<std::path::PathBuf>,
-    messages: &mut Vec<(String, String)>,
-) {
+/// The chat panel's share of the app state.
+struct Chat<'a> {
+    running: &'a mut Running,
+    tags: &'a mut HashMap<String, String>,
+    chat_with: &'a mut String,
+    draft: &'a mut String,
+    attachments: &'a mut Vec<std::path::PathBuf>,
+}
+
+fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryView, past: &[PastSession], messages: &mut Vec<(String, String)>) {
+    let Chat { running, tags, chat_with, draft, attachments } = chat;
     let team_running = running.keys().any(|(t, _)| *t == team.name);
     ui.horizontal(|ui| {
         if team_running {
@@ -796,8 +836,21 @@ fn chat_view(
         for m in &team.members {
             ui.selectable_value(chat_with, m.name.clone(), &m.name);
         }
+        ui.separator();
+        if ui.toggle_value(&mut hv.open, "🕘 History").on_hover_text("This agent's past conversations").clicked() {
+            hv.for_key = None;
+        }
     });
     let key = (team.name.clone(), chat_with.clone());
+    if hv.open {
+        let live_id = running.get(&key).and_then(|a| a.session_id());
+        if let Some((summary, entries)) = history_view(ui, team, &key.1, past, hv, live_id) {
+            reopen(team, &key.1, &summary.id, entries, running, tags);
+            hv.open = false;
+            hv.viewing = None;
+        }
+        return;
+    }
     let Some(agent) = running.get_mut(&key) else {
         ui.label(if team_running {
             "This agent is not running. Stop and start the team to add it."
@@ -1038,36 +1091,157 @@ fn route_messages(running: &Running, tags: &HashMap<String, String>) -> Vec<(Str
     delivered
 }
 
-fn start_team(team: &Team, running: &mut Running, tags: &mut HashMap<String, String>) {
-    let cwd = team.working_dir();
-    let list_id = team.task_list_id();
-    let lead = team.lead_name();
-    // Session names must be unique on the machine: a leftover session or another team's "Developer 1" would
-    // make SendMessage ambiguous, so every launch gets its own suffix.
+/// Session names must be unique on the machine: a leftover session or another team's "Developer 1" would
+/// make SendMessage ambiguous, so every launch gets its own suffix.
+fn new_tag() -> String {
     use std::hash::{BuildHasher, Hasher};
-    let tag = format!("{:04x}", std::collections::hash_map::RandomState::new().build_hasher().finish() as u16);
-    // The lead runs on the default model; each member on its own pick.
-    let seats = std::iter::once((lead.as_str(), "", prompt::render_lead(team, &tag)))
-        .chain(team.members.iter().map(|m| (m.name.as_str(), m.model.as_str(), prompt::render_member(team, m, &tag))));
-    for (name, model, system_prompt) in seats {
-        let session_name = prompt::tagged(name.trim(), &tag);
-        let launch = runner::Launch {
-            name: &session_name,
-            cwd: &cwd,
-            model,
-            permission_mode: &team.permission_mode,
-            system_prompt,
-            task_list_id: &list_id,
-        };
-        // Bevy redraws every frame, so the reader threads need no wake-up call.
-        match Agent::start(launch, || {}) {
-            Ok(agent) => {
-                running.insert((team.name.clone(), name.to_string()), agent);
-            }
-            Err(e) => eprintln!("could not start {name}: {e}"),
+    format!("{:04x}", std::collections::hash_map::RandomState::new().build_hasher().finish() as u16)
+}
+
+fn start_team(team: &Team, running: &mut Running, tags: &mut HashMap<String, String>) {
+    let tag = new_tag();
+    let names = std::iter::once(team.lead_name()).chain(team.members.iter().map(|m| m.name.clone()));
+    for name in names {
+        if let Some(agent) = start_seat(team, &name, &tag, None) {
+            running.insert((team.name.clone(), name), agent);
         }
     }
     tags.insert(team.name.clone(), tag);
+}
+
+/// Starts the lead or the member called `name`, on a new session or resuming `resume`.
+fn start_seat(team: &Team, name: &str, tag: &str, resume: Option<&str>) -> Option<Agent> {
+    // The lead runs on the default model; each member on its own pick.
+    let (model, system_prompt) = if name == team.lead_name() {
+        (String::new(), prompt::render_lead(team, tag))
+    } else {
+        let m = team.members.iter().find(|m| m.name == name)?;
+        (m.model.clone(), prompt::render_member(team, m, tag))
+    };
+    let session_name = prompt::tagged(name.trim(), tag);
+    let launch = runner::Launch {
+        name: &session_name,
+        cwd: &team.working_dir(),
+        model: &model,
+        permission_mode: &team.permission_mode,
+        system_prompt,
+        task_list_id: &team.task_list_id(),
+        resume,
+    };
+    // Bevy redraws every frame, so the reader threads need no wake-up call.
+    Agent::start(launch, || {}).inspect_err(|e| eprintln!("could not start {name}: {e}")).ok()
+}
+
+/// Restarts one agent on a past session, showing that session's conversation first. The rest of the team keeps
+/// running; if it was stopped, only this agent starts.
+fn reopen(team: &Team, name: &str, id: &str, earlier: Vec<Entry>, running: &mut Running, tags: &mut HashMap<String, String>) {
+    let team_running = running.keys().any(|(t, _)| *t == team.name);
+    let tag = tags.get(&team.name).filter(|_| team_running).cloned().unwrap_or_else(new_tag);
+    let key = (team.name.clone(), name.to_string());
+    // Stop the current session first: two sessions must not share the name.
+    running.remove(&key);
+    if let Some(agent) = start_seat(team, name, &tag, Some(id)) {
+        agent.preload(earlier);
+        running.insert(key, agent);
+    }
+    tags.insert(team.name.clone(), tag);
+}
+
+/// The History mode of the chat panel. Returns the conversation to reopen, with its entries, when asked.
+fn history_view(
+    ui: &mut egui::Ui,
+    team: &Team,
+    agent: &str,
+    past: &[PastSession],
+    hv: &mut HistoryView,
+    live_id: Option<String>,
+) -> Option<(history::Summary, Vec<Entry>)> {
+    let key = (team.name.clone(), agent.to_string());
+    if hv.for_key.as_ref() != Some(&key) {
+        hv.list = history_list(team, agent, past);
+        hv.for_key = Some(key);
+        hv.viewing = None;
+    }
+
+    if let Some((summary, entries)) = &hv.viewing {
+        let mut back = false;
+        let mut reopen = None;
+        let live = live_id.as_deref() == Some(summary.id.as_str());
+        ui.horizontal(|ui| {
+            back = ui.button("← Back").clicked();
+            let button = ui
+                .add_enabled(!live, egui::Button::new("Reopen"))
+                .on_hover_text("Restart this agent on this conversation, so it continues where it left off")
+                .on_disabled_hover_text("This conversation is the one running now");
+            if button.clicked() {
+                reopen = Some((summary.clone(), entries.clone()));
+            }
+            ui.weak(history::format_time(summary.started_at));
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().id_salt(("past", &summary.id)).auto_shrink(false).show(ui, |ui| {
+            if entries.is_empty() {
+                ui.weak("Nothing to show: the transcript is empty or unreadable.");
+            }
+            for entry in entries {
+                chat_entry(ui, agent, entry, "");
+            }
+        });
+        if back {
+            hv.viewing = None;
+        }
+        return reopen;
+    }
+
+    ui.horizontal(|ui| {
+        ui.weak(format!("{} past conversations of {agent}", hv.list.len()));
+        if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
+            hv.for_key = None;
+        }
+    });
+    if hv.list.is_empty() {
+        ui.label("No past conversations yet.");
+        return None;
+    }
+    let mut open = None;
+    egui::ScrollArea::vertical().id_salt("past_list").auto_shrink(false).show(ui, |ui| {
+        for s in &hv.list {
+            let mark = if live_id.as_deref() == Some(s.id.as_str()) { "● " } else { "" };
+            let preview = if s.preview.is_empty() { "(no messages)" } else { s.preview.as_str() };
+            let text = format!("{mark}{}  {preview}", history::format_time(s.started_at));
+            let row = ui.add_enabled(s.path.is_some(), egui::Button::selectable(false, text).truncate());
+            if row.on_disabled_hover_text("Claude no longer has this transcript").clicked() {
+                open = Some(s.clone());
+            }
+        }
+    });
+    if let Some(s) = open {
+        let entries = s.path.as_deref().map(history::load).unwrap_or_default();
+        hv.viewing = Some((s, entries));
+    }
+    None
+}
+
+/// The agent's sessions the app recorded, plus transcripts named after it in the team's folder, newest first.
+fn history_list(team: &Team, agent: &str, past: &[PastSession]) -> Vec<history::Summary> {
+    let cwd = team.working_dir();
+    let mut list = history::discover(&cwd, agent);
+    // Another team in the same folder may have an agent of the same name: trust the record over the name.
+    list.retain(|s| !past.iter().any(|p| p.id == s.id && (p.team != team.name || p.agent != agent)));
+    for p in past.iter().filter(|p| p.team == team.name && p.agent == agent) {
+        match list.iter_mut().find(|s| s.id == p.id) {
+            Some(s) if !p.preview.is_empty() => s.preview = p.preview.clone(),
+            Some(_) => {}
+            None => list.push(history::Summary {
+                id: p.id.clone(),
+                started_at: p.started_at,
+                preview: p.preview.clone(),
+                path: history::find(&cwd, &p.id),
+            }),
+        }
+    }
+    list.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+    list
 }
 
 /// Removes a launch tag from a session name, or from text that mentions session names.
