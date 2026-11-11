@@ -57,6 +57,62 @@ pub struct Team {
     /// `--permission-mode` of the sessions the app runs; nobody can answer a prompt in them.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// Prompts the app sends to the lead on a schedule, while the app and the lead are running.
+    #[serde(default)]
+    pub routines: Vec<Routine>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Routine {
+    pub name: String,
+    pub enabled: bool,
+    pub prompt: String,
+    pub schedule: Schedule,
+    /// Unix seconds of the last time it was sent; 0 = never.
+    pub last_run: i64,
+}
+
+impl Routine {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.into(), enabled: true, prompt: String::new(), schedule: Schedule::Every { n: 1, hours: true }, last_run: 0 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Schedule {
+    /// Every `n` minutes, or hours when `hours`.
+    Every { n: u32, hours: bool },
+    /// At `hour:minute` local time on the ticked days, Monday first.
+    Daily { hour: u32, minute: u32, days: [bool; 7] },
+}
+
+impl Schedule {
+    /// The first time this schedule fires strictly after `t` (Unix seconds); i64::MAX if never.
+    pub fn next_after(&self, t: i64) -> i64 {
+        match *self {
+            Schedule::Every { n, hours } => t + i64::from(n.max(1)) * if hours { 3600 } else { 60 },
+            Schedule::Daily { hour, minute, days } => {
+                // SAFETY: tm is plain data; localtime_r writes into it and mktime reads and normalizes it.
+                let mut today: libc::tm = unsafe { std::mem::zeroed() };
+                if unsafe { libc::localtime_r(&t, &mut today) }.is_null() {
+                    return i64::MAX;
+                }
+                for offset in 0..=7 {
+                    let mut tm = today;
+                    tm.tm_mday += offset;
+                    tm.tm_hour = hour as i32;
+                    tm.tm_min = minute as i32;
+                    tm.tm_sec = 0;
+                    tm.tm_isdst = -1;
+                    let at = unsafe { libc::mktime(&mut tm) };
+                    if at > t && days[((tm.tm_wday + 6) % 7) as usize] {
+                        return at;
+                    }
+                }
+                i64::MAX
+            }
+        }
+    }
 }
 
 fn default_permission_mode() -> String {
@@ -74,6 +130,7 @@ impl Team {
             rules: String::new(),
             members: Vec::new(),
             permission_mode: default_permission_mode(),
+            routines: Vec::new(),
         }
     }
 
@@ -190,6 +247,27 @@ fn write_atomic(path: &PathBuf, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedules_find_their_next_run() {
+        assert_eq!(Schedule::Every { n: 15, hours: false }.next_after(1000), 1000 + 900);
+        assert_eq!(Schedule::Every { n: 2, hours: true }.next_after(0), 7200);
+        assert_eq!(Schedule::Daily { hour: 9, minute: 0, days: [false; 7] }.next_after(0), i64::MAX);
+        // Every day at 09:30: within a day after t, at 09:30 local, and stable when asked again from the result.
+        let daily = Schedule::Daily { hour: 9, minute: 30, days: [true; 7] };
+        let t = 1_800_000_000;
+        let next = daily.next_after(t);
+        assert!(next > t && next <= t + 86_400);
+        assert!(crate::history::format_time(next).ends_with("09:30"));
+        assert!(daily.next_after(next) - next >= 82_800, "next day, allowing a DST shift");
+        // Only one weekday ticked: the next run is within a week.
+        let mut days = [false; 7];
+        days[2] = true;
+        let weekly = Schedule::Daily { hour: 9, minute: 30, days };
+        let next = weekly.next_after(t);
+        assert!(next > t && next <= t + 7 * 86_400);
+        assert!(weekly.next_after(next) - next >= 6 * 86_400);
+    }
 
     #[test]
     fn team_for_dir_prefers_the_closest_enabled_directory() {

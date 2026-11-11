@@ -125,6 +125,8 @@ struct Factory {
     notifications: Vec<(String, String)>,
     /// The user's picks on pending questions, by request id: per question, the options ticked and the "Other" text.
     answers: HashMap<String, Vec<(Vec<bool>, String)>>,
+    /// When each enabled routine fires next, by (team, routine name, schedule) so an edit reschedules it.
+    routine_next: HashMap<(String, String, team::Schedule), i64>,
 }
 
 /// The chat panel's History mode: an agent's past conversations, and the one being read.
@@ -163,6 +165,7 @@ impl Factory {
             history: HistoryView::default(),
             notifications: Vec::new(),
             answers: HashMap::new(),
+            routine_next: HashMap::new(),
         }
     }
 
@@ -190,8 +193,39 @@ impl Factory {
                 }
             }
             self.record_sessions();
+            self.run_routines();
             self.last_poll = Instant::now();
         }
+    }
+
+    /// Sends each due routine's prompt to its team's lead. A run that finds the lead stopped is skipped, not queued,
+    /// and runs missed while the app was closed are not caught up.
+    fn run_routines(&mut self) {
+        let now = history::now();
+        let mut live = HashMap::new();
+        for team in &mut self.store.teams {
+            let lead = (team.name.clone(), team.lead_name());
+            for r in team.routines.iter_mut().filter(|r| r.enabled) {
+                let key = (team.name.clone(), r.name.clone(), r.schedule.clone());
+                let next = *self.routine_next.entry(key.clone()).or_insert_with(|| {
+                    let n = r.schedule.next_after(r.last_run);
+                    if n > now { n } else { r.schedule.next_after(now) }
+                });
+                if now < next {
+                    live.insert(key, next);
+                    continue;
+                }
+                live.insert(key, r.schedule.next_after(now));
+                if let Some(agent) = self.running.get_mut(&lead)
+                    && agent.status() != Status::Exited
+                {
+                    agent.send(&format!("[Routine: {}]\n{}", r.name, r.prompt.trim()), &[]);
+                    r.last_run = now;
+                }
+            }
+        }
+        // Drops disabled, renamed and rescheduled routines, so they start fresh when they come back.
+        self.routine_next = live;
     }
 
     /// Saves each running agent's session to the store's history, with its first message once it has one.
@@ -533,6 +567,8 @@ fn details_panel(ui: &mut egui::Ui, f: &mut Factory, messages: &mut Vec<(String,
                 team_editor(ui, team, &mut delete, &mut export);
                 ui.add_space(8.0);
                 members_editor(ui, team);
+                ui.add_space(8.0);
+                routines_editor(ui, team);
                 ui.add_space(8.0);
                 live_sessions(ui, &sessions.iter().collect::<Vec<_>>());
                 ui.add_space(8.0);
@@ -884,6 +920,66 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
     });
 }
 
+fn routines_editor(ui: &mut egui::Ui, team: &mut Team) {
+    use team::{Routine, Schedule};
+    ui.heading("Routines");
+    ui.weak("Prompts sent to the lead on a schedule, while the app and the lead are running. Missed runs are skipped.");
+    let mut remove = None;
+    for (i, r) in team.routines.iter_mut().enumerate() {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(140.0));
+                ui.checkbox(&mut r.enabled, "Enabled");
+                ui.weak(if r.last_run == 0 { "never run".to_string() } else { format!("last run {}", history::format_time(r.last_run)) });
+                if ui.button("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+            ui.horizontal(|ui| {
+                let every = matches!(r.schedule, Schedule::Every { .. });
+                egui::ComboBox::from_id_salt(("schedule", i)).selected_text(if every { "Every" } else { "Daily at" }).show_ui(ui, |ui| {
+                    if ui.selectable_label(every, "Every").clicked() && !every {
+                        r.schedule = Schedule::Every { n: 1, hours: true };
+                    }
+                    if ui.selectable_label(!every, "Daily at").clicked() && every {
+                        r.schedule = Schedule::Daily { hour: 9, minute: 0, days: [true, true, true, true, true, false, false] };
+                    }
+                });
+                match &mut r.schedule {
+                    Schedule::Every { n, hours } => {
+                        ui.add(egui::DragValue::new(n).range(1..=999));
+                        egui::ComboBox::from_id_salt(("unit", i)).selected_text(if *hours { "hours" } else { "minutes" }).show_ui(ui, |ui| {
+                            ui.selectable_value(hours, false, "minutes");
+                            ui.selectable_value(hours, true, "hours");
+                        });
+                    }
+                    Schedule::Daily { hour, minute, days } => {
+                        ui.add(egui::DragValue::new(hour).range(0..=23).custom_formatter(|v, _| format!("{v:02}")));
+                        ui.label(":");
+                        ui.add(egui::DragValue::new(minute).range(0..=59).custom_formatter(|v, _| format!("{v:02}")));
+                        for (day, on) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().zip(days.iter_mut()) {
+                            ui.checkbox(on, *day);
+                        }
+                    }
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut r.prompt)
+                    .hint_text("What the lead should do each time, e.g. Check the open PRs and report their CI status.")
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+    if let Some(i) = remove {
+        team.routines.remove(i);
+    }
+    if ui.button("+ Routine").clicked() {
+        team.routines.push(Routine::new(&format!("Routine {}", team.routines.len() + 1)));
+    }
+}
+
 fn live_sessions(ui: &mut egui::Ui, sessions: &[&live::Session]) {
     ui.heading("Live sessions");
     if sessions.is_empty() {
@@ -986,9 +1082,11 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
         .auto_shrink(false)
         .max_height(ui.available_height() - input_height)
         .show(ui, |ui| {
-            for entry in agent.entries() {
-                chat_entry(ui, &key.1, &entry, tags.get(&team.name).map_or("", |t| t.as_str()));
-            }
+            keep_label_selection(ui, |ui| {
+                for entry in agent.entries() {
+                    chat_entry(ui, &key.1, &entry, tags.get(&team.name).map_or("", |t| t.as_str()));
+                }
+            });
             if agent.status() == Status::Working {
                 ui.weak(format!("{} is working…", key.1));
             }
@@ -1143,6 +1241,10 @@ fn skill_popup_keys(ui: &mut egui::Ui, edit_id: egui::Id, draft: &str, commands:
                 p.open = false;
             }
         });
+        // egui already queued a Tab focus move at the start of the frame; cancel it so the cursor stays in the input.
+        if picked.is_some() {
+            ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
     }
     ui.data_mut(|d| d.insert_temp(popup_id, p));
     picked
@@ -1302,9 +1404,11 @@ fn history_view(
             if entries.is_empty() {
                 ui.weak("Nothing to show: the transcript is empty or unreadable.");
             }
-            for entry in entries {
-                chat_entry(ui, agent, entry, "");
-            }
+            keep_label_selection(ui, |ui| {
+                for entry in entries {
+                    chat_entry(ui, agent, entry, "");
+                }
+            });
         });
         if back {
             hv.viewing = None;
@@ -1391,13 +1495,43 @@ fn chat_entry(ui: &mut egui::Ui, agent: &str, entry: &Entry, tag: &str) {
     copy_menu(ui.label(clean(text)), clean(text));
 }
 
-/// Right-click Copy on a chat message, for its whole text.
+/// Right-click menu on a chat message: Copy for its whole text, Copy selection for the text selected in the log.
 fn copy_menu(response: egui::Response, text: String) {
     response.context_menu(|ui| {
         if ui.button("Copy").clicked() {
             ui.ctx().copy_text(text);
         }
+        let selected = ui.ctx().plugin::<egui::text_selection::LabelSelectionState>().lock().has_selection();
+        if ui.add_enabled(selected, egui::Button::new("Copy selection")).clicked() {
+            // Only egui can read the selected text, on a Copy event; `keep_label_selection` sends one next frame.
+            ui.data_mut(|d| d.insert_temp(egui::Id::new(COPY_SELECTION), true));
+        }
     });
+}
+
+const COPY_SELECTION: &str = "copy_label_selection";
+
+/// Draws the chat log with its label text selection surviving a right-click. egui drops the selection on any press,
+/// so while the right button is involved or a menu is open, the selection from the last quiet frame is put back.
+fn keep_label_selection(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    use egui::{Event, PointerButton::Secondary, text_selection::LabelSelectionState};
+    let (snapshot, copy) = (egui::Id::new("label_selection_snapshot"), egui::Id::new(COPY_SELECTION));
+    let copying = ui.data_mut(|d| d.remove_temp::<bool>(copy)).unwrap_or(false);
+    if copying {
+        // Labels gather the selected text on a Copy event; egui copies it at the end of the pass, after any TextEdit.
+        ui.input_mut(|i| i.events.push(Event::Copy));
+    }
+    let keep = ui.input(|i| i.pointer.button_down(Secondary) || i.pointer.button_released(Secondary)) || ui.ctx().any_popup_open();
+    add(ui);
+    let plugin = ui.ctx().plugin::<LabelSelectionState>();
+    if keep {
+        if let Some(saved) = ui.data(|d| d.get_temp::<LabelSelectionState>(snapshot)) {
+            *plugin.lock() = saved;
+        }
+    } else {
+        let now = plugin.lock().clone();
+        ui.data_mut(|d| d.insert_temp(snapshot, now));
+    }
 }
 
 #[cfg(test)]
