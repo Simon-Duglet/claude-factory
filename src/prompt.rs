@@ -81,6 +81,15 @@ pub fn render_lead(team: &Team, tag: &str) -> String {
          The whole team shares one task list. Plan with it: TaskCreate one task per piece of work, with `owner` set \
          to the teammate who does it and `blockedBy` for ordering (QA after the developer), then give the teammate \
          the task id when you hand it over. Keep the list true: it is what the user watches.\n\n\
+         ## Notifications\n\
+         When an event matches a notification rule in the team rules (for example \"notify me when a PR is \
+         created\"), call the PushNotification tool (load it with ToolSearch if it is deferred) with a one-line \
+         message saying what happened. The app shows it to the user even when the tool reports it was not sent. \
+         Without such a rule, do not notify.\n\n\
+         ## Asking the user\n\
+         When you need a decision only the user can make, call the AskUserQuestion tool with 2-4 options. The app \
+         shows it with clickable choices and an \"Other\" field, and the tool result is the user's answer: wait for \
+         it, do not guess.\n\n\
          ## Your teammates\n\
          Each teammate is already running as a separate Claude Code session on this machine. Reach one with the \
          SendMessage tool, using the exact name below as `to`. Their replies arrive as messages and start a new \
@@ -123,6 +132,8 @@ mod tests {
         let lead = render_lead(&team, "");
         assert!(lead.contains("You are the team lead"));
         assert!(lead.contains("Shared task list") && text.contains("Shared task list"));
+        assert!(lead.contains("PushNotification") && !text.contains("PushNotification"));
+        assert!(lead.contains("AskUserQuestion") && !text.contains("AskUserQuestion"));
         assert!(lead.contains("- **Alice**: Developer") && lead.contains("- **Bob**: QA"));
     }
 

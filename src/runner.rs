@@ -67,10 +67,28 @@ struct Shared {
     status: Option<Status>,
     /// SendMessage calls this agent made, as (to, message), until the app routes them.
     outbox: Vec<(String, String)>,
+    /// PushNotification messages this agent sent, until the app shows them.
+    notifications: Vec<String>,
+    /// AskUserQuestion calls waiting for the user's answer, oldest first.
+    questions: Vec<Question>,
+    /// Here rather than on Agent so the reader thread can answer permission requests.
+    stdin: Option<ChildStdin>,
     /// Slash commands (skills included) the session accepts, as (name, description).
     commands: Vec<(String, String)>,
     /// Claude's id for this conversation, from the first event that carries it.
     session_id: Option<String>,
+    /// Tasks (background Bash, subagents) started but not yet notified as finished; the agent is waiting on them.
+    open_tasks: std::collections::HashSet<String>,
+}
+
+/// An AskUserQuestion call the session is blocked on until the app answers its `can_use_tool` request.
+#[derive(Clone)]
+pub struct Question {
+    pub request_id: String,
+    /// The tool input: `questions`, each with `question`, `header`, `options` (`label`, `description`) and `multiSelect`.
+    pub input: Value,
+    /// Not yet handed out by `Agent::questions`, so the app alerts the user once.
+    pub new: bool,
 }
 
 pub struct Launch<'a> {
@@ -88,7 +106,6 @@ pub struct Launch<'a> {
 /// One teammate: a long-lived `claude -p` session the app talks to over stream-json.
 pub struct Agent {
     child: Child,
-    stdin: Option<ChildStdin>,
     shared: Arc<Mutex<Shared>>,
     /// The agent's NESTED_DISPLAY, to stop a Xephyr that outlives the agent.
     display: String,
@@ -101,8 +118,8 @@ impl Agent {
         cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
             .args(["--name", launch.name])
             .args(["--permission-mode", launch.permission_mode])
-            // Nobody can answer a prompt in a headless session: deny instead of hanging the turn.
-            .args(["--permission-prompts", "none"])
+            // Prompts come to the app over stdio: it answers AskUserQuestion from the user and denies the rest (see `apply`).
+            .args(["--permission-prompts", "host", "--permission-prompt-tool", "stdio"])
             // Teammates must receive each other's messages whatever the permission modes are.
             .args(["--settings", r#"{"crossSessionInbound":"accept"}"#])
             .args(["--append-system-prompt", &launch.system_prompt])
@@ -170,14 +187,15 @@ impl Agent {
             let req = json!({ "type": "control_request", "request_id": "init", "request": { "subtype": "initialize" } });
             let _ = writeln!(w, "{req}").and_then(|_| w.flush());
         }
-        Ok(Self { child, stdin, shared, display })
+        shared.lock().unwrap().stdin = stdin;
+        Ok(Self { child, shared, display })
     }
 
     pub fn send(&mut self, text: &str, files: &[std::path::PathBuf]) {
         let (text, content) = crate::attach::message(text, files);
         let line = json!({ "type": "user", "message": { "role": "user", "content": content } }).to_string();
-        let sent = self.stdin.as_mut().is_some_and(|w| writeln!(w, "{line}").and_then(|_| w.flush()).is_ok());
         let mut shared = self.shared.lock().unwrap();
+        let sent = shared.write(&line);
         if sent {
             shared.entries.push(Entry::User(text));
             shared.status = Some(Status::Working);
@@ -187,7 +205,7 @@ impl Agent {
     }
 
     pub fn status(&self) -> Status {
-        self.shared.lock().unwrap().status.unwrap_or(Status::Starting)
+        self.shared.lock().unwrap().status()
     }
 
     pub fn entries(&self) -> Vec<Entry> {
@@ -233,6 +251,30 @@ impl Agent {
         std::mem::take(&mut self.shared.lock().unwrap().outbox)
     }
 
+    /// Takes the PushNotification messages this agent sent since the last call.
+    pub fn take_notifications(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.lock().unwrap().notifications)
+    }
+
+    /// The questions waiting for the user; each comes back with `new` set exactly once.
+    pub fn questions(&self) -> Vec<Question> {
+        let mut shared = self.shared.lock().unwrap();
+        let out = shared.questions.clone();
+        shared.questions.iter_mut().for_each(|q| q.new = false);
+        out
+    }
+
+    /// Answers a pending question; `answers` maps each question's text to the chosen label(s) or the user's own text.
+    pub fn answer(&self, request_id: &str, answers: serde_json::Map<String, Value>) {
+        let mut shared = self.shared.lock().unwrap();
+        let Some(i) = shared.questions.iter().position(|q| q.request_id == request_id) else { return };
+        let mut input = shared.questions.remove(i).input;
+        let shown: Vec<String> = answers.iter().map(|(q, a)| format!("{q} → {}", a.as_str().unwrap_or(""))).collect();
+        input["answers"] = Value::Object(answers);
+        shared.reply(request_id, json!({ "behavior": "allow", "updatedInput": input }));
+        shared.entries.push(Entry::User(shown.join("\n")));
+    }
+
     /// Shows a teammate's message in this agent's chat: the stream never echoes messages received from other sessions.
     pub fn note_incoming(&self, from: &str, text: &str) {
         self.shared.lock().unwrap().entries.push(Entry::Incoming { from: from.into(), text: text.into() });
@@ -241,7 +283,7 @@ impl Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        self.stdin.take();
+        self.shared.lock().unwrap().stdin.take();
         // TERM the whole group now; the grace period and the KILL run off the UI thread.
         let (pid, display) = (self.child.id(), std::mem::take(&mut self.display));
         signal_group(pid, libc::SIGTERM);
@@ -355,6 +397,27 @@ fn stop_xephyr(display: &str) {
     }
 }
 
+impl Shared {
+    /// An idle agent still waiting on a background task counts as working.
+    fn status(&self) -> Status {
+        match self.status {
+            Some(Status::Idle) if !self.open_tasks.is_empty() => Status::Working,
+            s => s.unwrap_or(Status::Starting),
+        }
+    }
+
+    /// Writes one stream-json line to the session; false when it is not running.
+    fn write(&mut self, line: &str) -> bool {
+        self.stdin.as_mut().is_some_and(|w| writeln!(w, "{line}").and_then(|_| w.flush()).is_ok())
+    }
+
+    fn reply(&mut self, request_id: &str, response: Value) {
+        let line = json!({ "type": "control_response",
+            "response": { "subtype": "success", "request_id": request_id, "response": response } });
+        self.write(&line.to_string());
+    }
+}
+
 fn apply(shared: &mut Shared, event: &Value) {
     // The first event (startup hooks, title) means the process is up; `init` itself only comes with the first turn.
     if shared.status == Some(Status::Starting) {
@@ -386,6 +449,9 @@ fn apply(shared: &mut Shared, event: &Value) {
                         {
                             shared.outbox.push((to.into(), text.into()));
                         }
+                        if let (Some("PushNotification"), Some(text)) = (block["name"].as_str(), input["message"].as_str()) {
+                            shared.notifications.push(text.into());
+                        }
                     }
                     _ => {}
                 }
@@ -402,12 +468,32 @@ fn apply(shared: &mut Shared, event: &Value) {
             }
             _ => {}
         },
+        (Some("control_request"), _) if event["request"]["subtype"] == "can_use_tool" => {
+            let id = event["request_id"].as_str().unwrap_or("").to_string();
+            if event["request"]["tool_name"] == "AskUserQuestion" {
+                shared.questions.push(Question { request_id: id, input: event["request"]["input"].clone(), new: true });
+            } else {
+                // Nobody watches for permission prompts: deny, as `--permission-prompts none` would.
+                shared.reply(&id, json!({ "behavior": "deny", "message": "Permission prompts are not available in this session." }));
+            }
+        }
+        (Some("control_cancel_request"), _) => shared.questions.retain(|q| q.request_id != event["request_id"].as_str().unwrap_or("")),
         (Some("control_response"), _) => {
             if let Some(commands) = event["response"]["response"]["commands"].as_array() {
                 shared.commands = commands
                     .iter()
                     .filter_map(|c| Some((c["name"].as_str()?.into(), c["description"].as_str().unwrap_or("").into())))
                     .collect();
+            }
+        }
+        (Some("system"), Some("task_started")) => {
+            if let Some(id) = event["task_id"].as_str() {
+                shared.open_tasks.insert(id.into());
+            }
+        }
+        (Some("system"), Some("task_notification")) => {
+            if let Some(id) = event["task_id"].as_str() {
+                shared.open_tasks.remove(id);
             }
         }
         (Some("result"), _) => {
@@ -469,7 +555,7 @@ fn grab(display: &str) -> Option<Thumbnail> {
 pub fn tool_summary(block: &Value) -> String {
     let name = block["name"].as_str().unwrap_or("tool");
     let input = &block["input"];
-    let detail = ["command", "file_path", "to", "pattern", "query", "description", "url"]
+    let detail = ["command", "file_path", "to", "pattern", "query", "description", "url", "message"]
         .iter()
         .find_map(|k| input[*k].as_str())
         .unwrap_or("");
@@ -496,10 +582,15 @@ mod tests {
         apply(&mut s, &json!({"type":"assistant","message":{"content":[
             {"type":"tool_use","name":"Bash","input":{"command":"cargo build\nmore"}},
             {"type":"tool_use","name":"SendMessage","input":{"to":"Bob","message":"please test"}},
+            {"type":"tool_use","name":"PushNotification","input":{"message":"PR #12 opened"}},
             {"type":"text","text":"done"}]}}));
         assert!(s.status == Some(Status::Working));
         apply(&mut s, &json!({"type":"result","subtype":"success","is_error":false}));
         assert!(s.status == Some(Status::Idle));
+        apply(&mut s, &json!({"type":"system","subtype":"task_started","task_id":"b1"}));
+        assert!(s.status() == Status::Working);
+        apply(&mut s, &json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"completed"}));
+        assert!(s.status() == Status::Idle);
 
         let shown: Vec<String> = s
             .entries
@@ -511,7 +602,17 @@ mod tests {
                 _ => "other".into(),
             })
             .collect();
-        assert_eq!(shown, ["in:ping from Bob", "tool:Bash: cargo build", "tool:SendMessage: Bob", "out:done"]);
+        assert_eq!(shown, ["in:ping from Bob", "tool:Bash: cargo build", "tool:SendMessage: Bob", "tool:PushNotification: PR #12 opened", "out:done"]);
+        assert_eq!(s.notifications, ["PR #12 opened"]);
+
+        let ask = |id: &str, tool: &str| json!({"type":"control_request","request_id":id,
+            "request":{"subtype":"can_use_tool","tool_name":tool,"input":{"questions":[]}}});
+        apply(&mut s, &ask("q1", "AskUserQuestion"));
+        apply(&mut s, &ask("q2", "AskUserQuestion"));
+        apply(&mut s, &ask("b1", "Bash"));
+        apply(&mut s, &json!({"type":"control_cancel_request","request_id":"q1"}));
+        let ids: Vec<&str> = s.questions.iter().map(|q| q.request_id.as_str()).collect();
+        assert_eq!(ids, ["q2"]);
         assert_eq!(s.outbox, [("Bob".to_string(), "please test".to_string())]);
     }
 }

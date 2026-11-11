@@ -9,6 +9,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use crate::runner::THUMB_WIDTH;
 use std::f32::consts::TAU;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeState {
@@ -52,6 +53,55 @@ pub struct SceneInput {
     pub selected: String,
     /// Messages to animate, as (from, to) node keys; `from` is `YOU` for what the user typed.
     pub messages: Vec<(String, String)>,
+    pub theme: Theme,
+}
+
+/// The scene's background: a clear colour and the particles drawn behind the graph.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    #[default]
+    Starfield,
+    Fireflies,
+    Snowfall,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 3] = [Theme::Starfield, Theme::Fireflies, Theme::Snowfall];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Starfield => "Starfield",
+            Theme::Fireflies => "Fireflies",
+            Theme::Snowfall => "Snowfall",
+        }
+    }
+
+    fn clear(self) -> Color {
+        match self {
+            Theme::Starfield => Color::srgb(0.035, 0.04, 0.07),
+            Theme::Fireflies => Color::srgb(0.03, 0.055, 0.04),
+            Theme::Snowfall => Color::srgb(0.06, 0.07, 0.10),
+        }
+    }
+
+    /// Where particle `unit` (in -0.5..0.5) with seed `phase` sits at time `t`, in the same unit square, and how it looks.
+    fn particle(self, unit: Vec2, phase: f32, t: f32) -> (Vec2, f32, Color) {
+        // Wraps a drifting coordinate back into -0.5..0.5.
+        let wrap = |v: f32| (v + 0.5).rem_euclid(1.0) - 0.5;
+        let speed = 0.5 + phase / TAU; // 0.5..1.5, per particle
+        match self {
+            Theme::Starfield => (unit, 0.8, Color::srgba(0.75, 0.82, 1.0, 0.25 + 0.2 * (t * 0.8 + phase).sin())),
+            Theme::Fireflies => {
+                let p = Vec2::new(wrap(unit.x + t * 0.006 * speed + 0.02 * (t * 0.5 + phase).sin()), wrap(unit.y + t * 0.004 * speed));
+                let glow = (0.5 + 0.5 * (t * 1.7 * speed + phase).sin()).powi(3);
+                (p, 1.2 + glow, Color::srgba(1.0, 0.85, 0.35, 0.1 + 0.6 * glow))
+            }
+            Theme::Snowfall => {
+                let p = Vec2::new(wrap(unit.x + 0.015 * (t * 0.6 * speed + phase).sin()), wrap(unit.y - t * 0.02 * speed));
+                (p, 0.8 + 0.6 * speed, Color::srgba(0.85, 0.9, 1.0, 0.2 + 0.25 * speed / 1.5))
+            }
+        }
+    }
 }
 
 /// What the scene reports back to the egui side.
@@ -136,7 +186,7 @@ impl Plugin for ScenePlugin {
             .init_resource::<Effects>()
             .insert_resource(Zoom(1.0))
             .insert_resource(UserView { zoom: 1.0, pan: Vec2::ZERO, press: None, last: Vec2::ZERO, dragging: false })
-            .insert_resource(ClearColor(Color::srgb(0.035, 0.04, 0.07)))
+            .insert_resource(ClearColor(Theme::default().clear()))
             .insert_gizmo_config(
                 DefaultGizmoConfigGroup,
                 GizmoConfig { line: GizmoLineConfig { width: 2.0, joints: GizmoLineJoint::Miter, ..default() }, ..default() },
@@ -581,19 +631,23 @@ fn draw(
     effects: Res<Effects>,
     nodes: Query<(&Node, &Transform)>,
     zoom: Res<Zoom>,
+    mut clear_color: ResMut<ClearColor>,
 ) {
     let t = time.elapsed_secs();
     let size = view_size(&camera, &zoom);
 
-    // Gizmos draw over the meshes, so stars keep clear of each node and its labels.
+    if clear_color.0 != input.theme.clear() {
+        clear_color.0 = input.theme.clear();
+    }
+    // Gizmos draw over the meshes, so particles keep clear of each node and its labels; edges are drawn after them.
     let clear: Vec<Vec2> = nodes.iter().map(|(_, t)| t.translation.truncate()).collect();
     for (unit, phase) in &effects.stars {
-        let p = Vec2::new(unit.x * size.x, unit.y * size.y);
+        let (unit, radius, color) = input.theme.particle(*unit, *phase, t);
+        let p = unit * size;
         if clear.iter().any(|c| (p.x - c.x).abs() < 75.0 && p.y < c.y + 60.0 && p.y > c.y - 110.0) {
             continue;
         }
-        let twinkle = 0.25 + 0.2 * (t * 0.8 + phase).sin();
-        gizmos.circle_2d(p, 0.8, Color::srgba(0.75, 0.82, 1.0, twinkle));
+        gizmos.circle_2d(p, radius, color);
     }
 
     let lead = nodes.iter().find(|(n, _)| n.is_lead);
@@ -684,6 +738,16 @@ mod tests {
         assert_eq!(to_world(viewport.center(), viewport, 2.0, Vec2::new(5.0, 7.0)), Vec2::new(5.0, 7.0));
         // 10 px right and 10 px down on screen, at 2 world units per pixel.
         assert_eq!(to_world(viewport.center() + Vec2::new(10.0, 10.0), viewport, 2.0, Vec2::ZERO), Vec2::new(20.0, -20.0));
+    }
+
+    #[test]
+    fn particles_wrap_inside_the_scene() {
+        for theme in Theme::ALL {
+            for t in [0.0, 1.0, 1e4] {
+                let (p, _, _) = theme.particle(Vec2::new(0.49, -0.49), 5.0, t);
+                assert!(p.x.abs() <= 0.5 && p.y.abs() <= 0.5, "{theme:?} at {t}: {p}");
+            }
+        }
     }
 
     #[test]

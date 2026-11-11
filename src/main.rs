@@ -121,6 +121,10 @@ struct Factory {
     /// The node the scene's context menu was opened on; None on empty canvas.
     menu_on: Option<String>,
     history: HistoryView,
+    /// Notifications agents raised, as (team, message), shown until dismissed.
+    notifications: Vec<(String, String)>,
+    /// The user's picks on pending questions, by request id: per question, the options ticked and the "Other" text.
+    answers: HashMap<String, Vec<(Vec<bool>, String)>>,
 }
 
 /// The chat panel's History mode: an agent's past conversations, and the one being read.
@@ -157,6 +161,8 @@ impl Factory {
             copied: None,
             menu_on: None,
             history: HistoryView::default(),
+            notifications: Vec::new(),
+            answers: HashMap::new(),
         }
     }
 
@@ -237,6 +243,13 @@ fn ui_system(
     let f = &mut *factory;
     f.poll_live();
     let delivered = route_messages(&f.running, &f.tags);
+    for ((team, _), agent) in &f.running {
+        for text in agent.take_notifications() {
+            // Best effort: no notify-send (or no notification daemon) still leaves the in-app toast.
+            let _ = std::process::Command::new("notify-send").args(["--app-name=Claude Factory", &format!("Claude Factory: {team}"), &text]).spawn();
+            f.notifications.push((team.clone(), text));
+        }
+    }
     if let Some(target) = output.right_clicked.take() {
         f.menu_on = target;
     }
@@ -354,12 +367,14 @@ fn ui_system(
 
     let scene_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(size.x as f32 / scale, size.y as f32 / scale));
     legend(&ctx, scene_rect, f.store.teams.is_empty());
+    notifications(&ctx, scene_rect, f);
     if let Some(team) = f.store.teams.get_mut(f.selected) {
         root.interact(scene_rect, egui::Id::new("scene"), egui::Sense::click())
-            .context_menu(|ui| scene_menu(ui, team, f.menu_on.as_deref(), &mut f.copied));
+            .context_menu(|ui| scene_menu(ui, team, f.menu_on.as_deref(), &mut f.copied, &mut f.store.theme));
     }
 
     scene.nodes.clear();
+    scene.theme = f.store.theme;
     scene.selected = if f.view == View::Chat { f.chat_with.clone() } else { String::new() };
     if let Some(team) = f.store.teams.get(f.selected) {
         let sessions: Vec<&live::Session> = f.sessions.iter().filter(|s| uses_team(&f.store, s, &team.name)).collect();
@@ -398,6 +413,103 @@ fn legend(ctx: &egui::Context, rect: egui::Rect, empty: bool) {
         .show(ctx, |ui| {
             ui.weak(if empty { "Create a team with \"+ New team\"." } else { "Click an agent to chat with it. Scroll to zoom, drag to move." });
         });
+}
+
+/// The agents' pending questions, then their notifications newest first, in the scene's top-right corner.
+fn notifications(ctx: &egui::Context, rect: egui::Rect, f: &mut Factory) {
+    let questions: Vec<_> = f.running.iter().flat_map(|((team, agent), a)| a.questions().into_iter().map(move |q| (team, agent, a, q))).collect();
+    if f.notifications.is_empty() && questions.is_empty() {
+        return;
+    }
+    let list = &mut f.notifications;
+    let mut dismiss = None;
+    egui::Area::new("notifications".into())
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(rect.right() - ctx.content_rect().right() - 10.0, rect.top() + 10.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(320.0);
+            for (team, agent, a, q) in &questions {
+                if q.new {
+                    let first = q.input["questions"][0]["question"].as_str().unwrap_or("");
+                    let _ = std::process::Command::new("notify-send")
+                        .args(["--app-name=Claude Factory", "--urgency=critical", &format!("{agent} ({team}) asks"), first])
+                        .spawn();
+                }
+                let picks = f.answers.entry(q.request_id.clone()).or_default();
+                if let Some(answers) = question_card(ui, agent, &q.input, picks) {
+                    a.answer(&q.request_id, answers);
+                    f.answers.remove(&q.request_id);
+                }
+            }
+            for (i, (team, text)) in list.iter().enumerate().rev() {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(team);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                                dismiss = Some(i);
+                            }
+                        });
+                    });
+                    ui.label(text);
+                });
+            }
+            if list.len() > 1 && ui.small_button("Dismiss all").clicked() {
+                dismiss = Some(usize::MAX);
+            }
+        });
+    match dismiss {
+        Some(usize::MAX) => list.clear(),
+        Some(i) => _ = list.remove(i),
+        None => {}
+    }
+}
+
+/// One AskUserQuestion: every question with its options and an "Other" field; returns the answers once submitted.
+fn question_card(ui: &mut egui::Ui, agent: &str, input: &serde_json::Value, picks: &mut Vec<(Vec<bool>, String)>) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let questions = input["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+    picks.resize_with(questions.len(), Default::default);
+    let mut submit = false;
+    egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, Color32::from_rgb(230, 180, 80))).show(ui, |ui| {
+        ui.strong(format!("{agent} asks"));
+        for (q, (ticked, other)) in questions.iter().zip(picks.iter_mut()) {
+            let options = q["options"].as_array().map(Vec::as_slice).unwrap_or_default();
+            ticked.resize(options.len(), false);
+            let multi = q["multiSelect"] == true;
+            ui.separator();
+            ui.label(q["question"].as_str().unwrap_or(""));
+            for (i, o) in options.iter().enumerate() {
+                let label = o["label"].as_str().unwrap_or("");
+                if ui.selectable_label(ticked[i], label).on_hover_text(o["description"].as_str().unwrap_or("")).clicked() {
+                    if !multi {
+                        ticked.iter_mut().for_each(|t| *t = false);
+                        other.clear();
+                    }
+                    ticked[i] = !ticked[i] || !multi;
+                }
+            }
+            if ui.add(egui::TextEdit::singleline(other).hint_text("Other…")).changed() && !multi && !other.is_empty() {
+                ticked.iter_mut().for_each(|t| *t = false);
+            }
+        }
+        let ready = picks.iter().all(|(t, o)| t.contains(&true) || !o.trim().is_empty());
+        submit = ui.add_enabled(ready, egui::Button::new("Answer")).clicked();
+    });
+    submit.then(|| question_answers(questions, picks))
+}
+
+/// The AskUserQuestion `answers` map: question text to the ticked labels and the "Other" text, comma-separated.
+fn question_answers(questions: &[serde_json::Value], picks: &[(Vec<bool>, String)]) -> serde_json::Map<String, serde_json::Value> {
+    questions
+        .iter()
+        .zip(picks)
+        .map(|(q, (ticked, other))| {
+            let mut chosen: Vec<&str> = q["options"].as_array().into_iter().flatten().zip(ticked).filter(|(_, t)| **t).filter_map(|(o, _)| o["label"].as_str()).collect();
+            if !other.trim().is_empty() {
+                chosen.push(other.trim());
+            }
+            (q["question"].as_str().unwrap_or("").to_string(), chosen.join(", ").into())
+        })
+        .collect()
 }
 
 fn details_panel(ui: &mut egui::Ui, f: &mut Factory, messages: &mut Vec<(String, String)>) {
@@ -667,7 +779,7 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
 }
 
 /// Right-click menu of the scene: copy or remove the agent under the cursor, paste or add one.
-fn scene_menu(ui: &mut egui::Ui, team: &mut Team, on: Option<&str>, copied: &mut Option<Member>) {
+fn scene_menu(ui: &mut egui::Ui, team: &mut Team, on: Option<&str>, copied: &mut Option<Member>, theme: &mut scene::Theme) {
     // None for the lead and empty canvas: neither can be copied or removed.
     let member = on.and_then(|key| team.members.iter().position(|m| m.name == key));
     if let Some(i) = member {
@@ -691,6 +803,13 @@ fn scene_menu(ui: &mut egui::Ui, team: &mut Team, on: Option<&str>, copied: &mut
             }
         }
     });
+    if on.is_none() {
+        ui.menu_button("Theme", |ui| {
+            for t in scene::Theme::ALL {
+                ui.radio_value(theme, t, t.label());
+            }
+        });
+    }
 }
 
 /// Appends `m`, numbering its name ("Developer 2") if another agent already has it.
@@ -1283,7 +1402,7 @@ fn copy_menu(response: egui::Response, text: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::slash_query;
+    use super::{question_answers, slash_query};
 
     #[test]
     fn finds_the_slash_word_being_typed() {
@@ -1291,6 +1410,17 @@ mod tests {
         assert_eq!(slash_query("/Sim"), Some((0, "sim".into())));
         assert_eq!(slash_query("please /rev"), Some((7, "rev".into())));
         assert_eq!(slash_query("line\n/x"), Some((5, "x".into())));
+    }
+
+    #[test]
+    fn question_answers_join_ticked_labels_and_other_text() {
+        let qs: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"question":"Color?","options":[{"label":"Red"},{"label":"Blue"}]},
+            {"question":"Sizes?","multiSelect":true,"options":[{"label":"S"},{"label":"M"},{"label":"L"}]}]"#).unwrap();
+        let picks = [(vec![false, true], String::new()), (vec![true, false, true], " XL ".into())];
+        let a = question_answers(&qs, &picks);
+        assert_eq!(a["Color?"], "Blue");
+        assert_eq!(a["Sizes?"], "S, L, XL");
         assert_eq!(slash_query("a/b"), None);
         assert_eq!(slash_query("/simplify "), None);
         assert_eq!(slash_query(""), None);

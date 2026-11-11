@@ -104,6 +104,9 @@ pub struct Store {
     /// Sessions the app ran, so the History view can list them by team and agent.
     #[serde(default)]
     pub history: Vec<PastSession>,
+    /// The team view's background.
+    #[serde(default)]
+    pub theme: crate::scene::Theme,
 }
 
 /// One conversation an agent had; its transcript is Claude Code's `<id>.jsonl`.
@@ -120,7 +123,7 @@ pub struct PastSession {
 
 impl Default for Store {
     fn default() -> Self {
-        Self { teams: Vec::new(), desktop_preview: true, history: Vec::new() }
+        Self { teams: Vec::new(), desktop_preview: true, history: Vec::new(), theme: Default::default() }
     }
 }
 
