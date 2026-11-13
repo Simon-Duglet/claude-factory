@@ -1,6 +1,8 @@
 mod attach;
 mod history;
+mod links;
 mod live;
+mod markdown;
 mod prompt;
 mod runner;
 mod scene;
@@ -484,7 +486,7 @@ fn notifications(ctx: &egui::Context, rect: egui::Rect, f: &mut Factory) {
                             }
                         });
                     });
-                    ui.label(text);
+                    links::label(ui, text, None);
                 });
             }
             if list.len() > 1 && ui.small_button("Dismiss all").clicked() {
@@ -510,7 +512,7 @@ fn question_card(ui: &mut egui::Ui, agent: &str, input: &serde_json::Value, pick
             ticked.resize(options.len(), false);
             let multi = q["multiSelect"] == true;
             ui.separator();
-            ui.label(q["question"].as_str().unwrap_or(""));
+            links::label(ui, q["question"].as_str().unwrap_or(""), None);
             for (i, o) in options.iter().enumerate() {
                 let label = o["label"].as_str().unwrap_or("");
                 if ui.selectable_label(ticked[i], label).on_hover_text(o["description"].as_str().unwrap_or("")).clicked() {
@@ -1480,24 +1482,28 @@ fn chat_entry(ui: &mut egui::Ui, agent: &str, entry: &Entry, tag: &str) {
         Entry::Incoming { from, text } => {
             ui.add_space(4.0);
             ui.colored_label(IDLE, egui::RichText::new(format!("From {}", clean(from))).strong());
-            copy_menu(ui.label(clean(text)), clean(text));
+            copy_menu(markdown::show(ui, &clean(text)), clean(text));
             return;
         }
         Entry::Assistant(t) => (agent, Color32::from_rgb(140, 200, 140), t.as_str()),
         Entry::Tool(t) => {
-            copy_menu(ui.weak(format!("  ⚙ {}", clean(t))), clean(t));
+            let weak = ui.visuals().weak_text_color();
+            copy_menu(links::label(ui, &format!("  ⚙ {}", clean(t)), Some(weak)), clean(t));
             return;
         }
         Entry::Error(t) => ("Error", FAILED, t.as_str()),
     };
     ui.add_space(4.0);
     ui.colored_label(color, egui::RichText::new(who).strong());
-    copy_menu(ui.label(clean(text)), clean(text));
+    copy_menu(markdown::show(ui, &clean(text)), clean(text));
 }
 
 /// Right-click menu on a chat message: Copy for its whole text, Copy selection for the text selected in the log.
+/// Opens on a right-click anywhere over `response`, even one that only senses hover (a markdown message).
 fn copy_menu(response: egui::Response, text: String) {
-    response.context_menu(|ui| {
+    let right_clicked = response.contains_pointer() && response.ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+    let open = right_clicked.then_some(egui::SetOpenCommand::Bool(true));
+    egui::Popup::menu(&response).open_memory(open).at_pointer_fixed().show(|ui| {
         if ui.button("Copy").clicked() {
             ui.ctx().copy_text(text);
         }
