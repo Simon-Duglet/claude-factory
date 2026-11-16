@@ -394,8 +394,10 @@ fn ui_system(
         .rect
         .width();
 
-    // The Bevy scene fills what the panels leave free.
-    let scale = window.scale_factor();
+    // The Bevy scene fills what the panels leave free. The panel widths are in egui points, so convert them with
+    // egui's own scale: the window's times the zoom (Ctrl +/-). With the window's scale alone, a zoomed UI left the
+    // scene click area stretched over the panels, where it swallowed every click.
+    let scale = ctx.pixels_per_point();
     let pos = UVec2::new((left * scale) as u32, (top * scale) as u32);
     let used = pos + UVec2::new(((right + task_panel) * scale) as u32, 0);
     let size = UVec2::new(window.physical_width().saturating_sub(used.x).max(1), window.physical_height().saturating_sub(used.y).max(1));
