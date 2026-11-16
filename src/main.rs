@@ -1084,6 +1084,7 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
         .auto_shrink(false)
         .max_height(ui.available_height() - input_height)
         .show(ui, |ui| {
+            brighten_chat_text(ui);
             keep_label_selection(ui, |ui| {
                 for entry in agent.entries() {
                     chat_entry(ui, &key.1, &entry, tags.get(&team.name).map_or("", |t| t.as_str()));
@@ -1403,6 +1404,7 @@ fn history_view(
         });
         ui.separator();
         egui::ScrollArea::vertical().id_salt(("past", &summary.id)).auto_shrink(false).show(ui, |ui| {
+            brighten_chat_text(ui);
             if entries.is_empty() {
                 ui.weak("Nothing to show: the transcript is empty or unreadable.");
             }
@@ -1474,7 +1476,28 @@ fn untag(text: &str, tag: &str) -> String {
     text.replace(&format!("-{tag}"), "")
 }
 
+/// egui's dark theme draws body text mid-gray (140) and weak text darker still, which is hard to read in a long chat.
+/// Makes both brighter for this ui and its children only; the rest of the app keeps the default look.
+fn brighten_chat_text(ui: &mut egui::Ui) {
+    let visuals = &mut ui.style_mut().visuals;
+    visuals.widgets.noninteractive.fg_stroke.color = Color32::from_gray(225);
+    visuals.weak_text_color = Some(Color32::from_gray(170));
+}
+
+/// Low-opacity blue behind the user's own messages, matching the color of their "You" label.
+const USER_MESSAGE_BG: Color32 = Color32::from_rgba_premultiplied(15, 21, 29, 32);
+
 fn chat_entry(ui: &mut egui::Ui, agent: &str, entry: &Entry, tag: &str) {
+    if let Entry::User(text) = entry {
+        let clean = if tag.is_empty() { text.clone() } else { untag(text, tag) };
+        ui.add_space(4.0);
+        egui::Frame::new().fill(USER_MESSAGE_BG).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.colored_label(Color32::from_rgb(120, 170, 230), egui::RichText::new("You").strong());
+            copy_menu(markdown::show(ui, &clean), clean.clone());
+        });
+        return;
+    }
     // Agents write each other's tagged session names; the user only knows the plain ones.
     let clean = |t: &str| if tag.is_empty() { t.to_string() } else { untag(t, tag) };
     let (who, color, text) = match entry {
