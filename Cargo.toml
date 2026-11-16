@@ -24,3 +24,7 @@ x11rb = "0.14"
 # Already in the tree; process groups, signals and PR_SET_PDEATHSIG for agent cleanup.
 libc = "0.2"
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
+
+# egui with a patch for text selection that spans more than the visible part of the chat log: see vendor/egui/PATCH.md.
+[patch.crates-io]
+egui = { path = "vendor/egui" }

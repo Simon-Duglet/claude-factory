@@ -41,7 +41,8 @@ pub fn label(ui: &mut egui::Ui, text: &str, color: Option<Color32>) -> egui::Res
     if let (true, Some(url)) = (response.clicked(), hovered_link) {
         open(url);
     }
-    if ui.is_rect_visible(response.rect) {
+    // Out of view labels still join a selection that is going on, so it can span the whole log.
+    if ui.is_rect_visible(response.rect) || LabelSelectionState::is_active(ui.ctx()) {
         let fallback = color.unwrap_or_else(|| ui.visuals().text_color());
         LabelSelectionState::label_text_selection(ui, &response, pos, galley, fallback, Stroke::NONE);
     }

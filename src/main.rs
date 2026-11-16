@@ -1543,7 +1543,7 @@ fn copy_menu(response: egui::Response, text: String) {
         if ui.button("Copy").clicked() {
             ui.ctx().copy_text(text);
         }
-        let selected = ui.ctx().plugin::<egui::text_selection::LabelSelectionState>().lock().has_selection();
+        let selected = all_selected(ui.ctx()) || ui.ctx().plugin::<egui::text_selection::LabelSelectionState>().lock().has_selection();
         if ui.add_enabled(selected, egui::Button::new("Copy selection")).clicked() {
             // Only egui can read the selected text, on a Copy event; `keep_label_selection` sends one next frame.
             ui.data_mut(|d| d.insert_temp(egui::Id::new(COPY_SELECTION), true));
@@ -1555,6 +1555,8 @@ const COPY_SELECTION: &str = "copy_label_selection";
 
 /// Draws the chat log with its label text selection surviving a right-click. egui drops the selection on any press,
 /// so while the right button is involved or a menu is open, the selection from the last quiet frame is put back.
+/// Also: Ctrl+A selects the whole log, off-screen text included, until the next click or Esc; and a drag that
+/// leaves the log scrolls it, so the selection can grow past the edge.
 fn keep_label_selection(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     use egui::{Event, PointerButton::Secondary, text_selection::LabelSelectionState};
     let (snapshot, copy) = (egui::Id::new("label_selection_snapshot"), egui::Id::new(COPY_SELECTION));
@@ -1563,17 +1565,73 @@ fn keep_label_selection(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         // Labels gather the selected text on a Copy event; egui copies it at the end of the pass, after any TextEdit.
         ui.input_mut(|i| i.events.push(Event::Copy));
     }
-    let keep = ui.input(|i| i.pointer.button_down(Secondary) || i.pointer.button_released(Secondary)) || ui.ctx().any_popup_open();
+    let keep = ui.input(|i| i.pointer.button_down(Secondary) || i.pointer.button_released(Secondary)) || egui::Popup::is_any_open(ui.ctx());
+    // egui clears the selection at the end of the pass on a press that is not on a label, such as one on the menu's Copy selection.
+    LabelSelectionState::keep_selection(ui.ctx(), keep);
+    let all = select_all_state(ui, keep);
+    LabelSelectionState::select_all(ui.ctx(), all);
     add(ui);
+    LabelSelectionState::select_all(ui.ctx(), false);
+    scroll_while_selecting(ui);
     let plugin = ui.ctx().plugin::<LabelSelectionState>();
     if keep {
         if let Some(saved) = ui.data(|d| d.get_temp::<LabelSelectionState>(snapshot)) {
             *plugin.lock() = saved;
         }
+        // The snapshot has the flag off; egui looks at it at the end of the pass.
+        LabelSelectionState::keep_selection(ui.ctx(), true);
     } else {
         let now = plugin.lock().clone();
         ui.data_mut(|d| d.insert_temp(snapshot, now));
     }
+}
+
+const SELECT_ALL: &str = "chat_select_all";
+
+/// Whether the whole log is selected: Ctrl+A turns it on (unless a text field has the keyboard, where it selects
+/// the field's text), a press or Esc turns it off (`keep`: the right-click menu is in use, leave it).
+fn select_all_state(ui: &mut egui::Ui, keep: bool) -> bool {
+    let id = egui::Id::new(SELECT_ALL);
+    let mut on = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    // Not for the right-click menu, which works on the selection.
+    if !keep && ui.input(|i| i.pointer.any_pressed() || i.key_pressed(Key::Escape)) {
+        on = false;
+    }
+    if !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
+        ui.ctx().plugin::<egui::text_selection::LabelSelectionState>().lock().clear_selection();
+        on = true;
+    }
+    ui.data_mut(|d| d.insert_temp(id, on));
+    on
+}
+
+/// Whether the log is selected as a whole, for the right-click menu.
+fn all_selected(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::new(SELECT_ALL))).unwrap_or(false)
+}
+
+/// While a drag that began in the log is held above or below it, scrolls the log, faster the further out the pointer
+/// is. The selection follows, as it is laid out under the pointer. Call at the end of the scroll area's content.
+fn scroll_while_selecting(ui: &egui::Ui) {
+    let id = egui::Id::new("chat_drag_from_log");
+    let view = ui.clip_rect();
+    let (pressed, down, pos, dt) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos(), i.stable_dt));
+    if pressed {
+        ui.data_mut(|d| d.insert_temp(id, pos.is_some_and(|p| view.contains(p))));
+    }
+    let from_log = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let Some(pos) = pos.filter(|_| down && from_log) else { return };
+    let outside = if pos.y < view.top() {
+        view.top() - pos.y
+    } else if pos.y > view.bottom() {
+        view.bottom() - pos.y
+    } else {
+        return;
+    };
+    // Points per second: 300 right at the edge, more as the pointer moves away, capped.
+    let speed = 300.0 + outside.abs().min(200.0) * 8.0;
+    ui.scroll_with_delta(egui::vec2(0.0, speed * dt * outside.signum()));
+    ui.ctx().request_repaint();
 }
 
 #[cfg(test)]
