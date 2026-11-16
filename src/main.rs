@@ -1021,6 +1021,9 @@ struct Chat<'a> {
     attachments: &'a mut Vec<std::path::PathBuf>,
 }
 
+/// Tallest the chat input grows before it scrolls inside.
+const CHAT_INPUT_MAX_HEIGHT: f32 = 160.0;
+
 fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryView, past: &[PastSession], messages: &mut Vec<(String, String)>) {
     let Chat { running, tags, chat_with, draft, attachments } = chat;
     let team_running = running.keys().any(|(t, _)| *t == team.name);
@@ -1079,12 +1082,73 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
         return;
     };
 
-    let input_height = if attachments.is_empty() { 70.0 } else { 100.0 };
+    // Declared before the log so the log takes what is left; the input grows with its text up to a limit, then scrolls.
+    egui::Panel::bottom("chat_input_panel").frame(egui::Frame::NONE).show(ui, |ui| {
+        ui.separator();
+        let temp = std::env::temp_dir();
+        let mut removed = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, path) in attachments.iter().enumerate() {
+                let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                ui.label(format!("📎 {name}")).on_hover_text(path.display().to_string());
+                if ui.small_button("✕").on_hover_text("Remove this attachment").clicked() {
+                    removed = Some(i);
+                }
+            }
+        });
+        if let Some(i) = removed {
+            attach::remove(attachments, i, &temp);
+        }
+        ui.horizontal(|ui| {
+            let edit_id = ui.make_persistent_id("chat_input");
+            paste_attachments(ui, edit_id, attachments, &temp);
+            let picked = skill_popup_keys(ui, edit_id, draft, &agent.commands());
+            let edit = egui::TextEdit::multiline(draft)
+                .id(edit_id)
+                .hint_text(format!("Message {} (Enter to send, Shift+Enter for a new line, / for skills, Ctrl+V to attach)", key.1))
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
+            // The scroll area keeps the caret in view once the text is taller than the limit.
+            let response = egui::ScrollArea::vertical()
+                .id_salt("chat_input_scroll")
+                .max_height(CHAT_INPUT_MAX_HEIGHT)
+                .max_width(ui.available_width() - 70.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| ui.add(edit))
+                .inner;
+            response.context_menu(|ui| {
+                let selected = egui::TextEdit::load_state(ui.ctx(), edit_id)
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| r.slice_str(draft).to_string())
+                    .filter(|t| !t.is_empty());
+                if ui.add_enabled(selected.is_some(), egui::Button::new("Copy")).clicked()
+                    && let Some(t) = selected
+                {
+                    ui.ctx().copy_text(t);
+                }
+                if ui.button("Paste").clicked() {
+                    // Done next frame by `paste_attachments`, once the input has its focus back.
+                    ui.memory_mut(|m| m.request_focus(edit_id));
+                    ui.data_mut(|d| d.insert_temp(edit_id.with("menu_paste"), true));
+                }
+            });
+            skill_popup(ui, &response, draft, picked);
+            let enter = response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+            if (ui.button("Send").clicked() || enter) && !(draft.trim().is_empty() && attachments.is_empty()) {
+                agent.send(draft.trim(), attachments);
+                messages.push((scene::YOU.to_string(), key.1.clone()));
+                draft.clear();
+                attachments.clear();
+                response.request_focus();
+            }
+        });
+    });
+
     egui::ScrollArea::vertical()
         .id_salt(("chat", &key.1))
         .stick_to_bottom(true)
         .auto_shrink(false)
-        .max_height(ui.available_height() - input_height)
         .show(ui, |ui| {
             brighten_chat_text(ui);
             keep_label_selection(ui, |ui| {
@@ -1096,59 +1160,6 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
                 ui.weak(format!("{} is working…", key.1));
             }
         });
-
-    ui.separator();
-    let temp = std::env::temp_dir();
-    let mut removed = None;
-    ui.horizontal_wrapped(|ui| {
-        for (i, path) in attachments.iter().enumerate() {
-            let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-            ui.label(format!("📎 {name}")).on_hover_text(path.display().to_string());
-            if ui.small_button("✕").on_hover_text("Remove this attachment").clicked() {
-                removed = Some(i);
-            }
-        }
-    });
-    if let Some(i) = removed {
-        attach::remove(attachments, i, &temp);
-    }
-    ui.horizontal(|ui| {
-        let edit_id = ui.make_persistent_id("chat_input");
-        paste_attachments(ui, edit_id, attachments, &temp);
-        let picked = skill_popup_keys(ui, edit_id, draft, &agent.commands());
-        let edit = egui::TextEdit::multiline(draft)
-            .id(edit_id)
-            .hint_text(format!("Message {} (Enter to send, Shift+Enter for a new line, / for skills, Ctrl+V to attach)", key.1))
-            .desired_rows(2)
-            .desired_width(ui.available_width() - 70.0)
-            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
-        let response = ui.add(edit);
-        response.context_menu(|ui| {
-            let selected = egui::TextEdit::load_state(ui.ctx(), edit_id)
-                .and_then(|s| s.cursor.char_range())
-                .map(|r| r.slice_str(draft).to_string())
-                .filter(|t| !t.is_empty());
-            if ui.add_enabled(selected.is_some(), egui::Button::new("Copy")).clicked()
-                && let Some(t) = selected
-            {
-                ui.ctx().copy_text(t);
-            }
-            if ui.button("Paste").clicked() {
-                // Done next frame by `paste_attachments`, once the input has its focus back.
-                ui.memory_mut(|m| m.request_focus(edit_id));
-                ui.data_mut(|d| d.insert_temp(edit_id.with("menu_paste"), true));
-            }
-        });
-        skill_popup(ui, &response, draft, picked);
-        let enter = response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
-        if (ui.button("Send").clicked() || enter) && !(draft.trim().is_empty() && attachments.is_empty()) {
-            agent.send(draft.trim(), attachments);
-            messages.push((scene::YOU.to_string(), key.1.clone()));
-            draft.clear();
-            attachments.clear();
-            response.request_focus();
-        }
-    });
 }
 
 /// On Ctrl+V or the context menu's Paste in the chat input, turns copied files or a raw image into attachments
