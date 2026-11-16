@@ -114,6 +114,9 @@ struct ViewportLabelSelectionState {
     /// claude-factory patch: every label drawn while this is set is fully selected.
     select_all: bool,
 
+    /// claude-factory patch: a press does not clear the selection while this is set (a context menu is in use).
+    keep_selection: bool,
+
     /// Painted selections this frame.
     ///
     /// Kept so we can undo a bad selection visualization if we don't see both ends of the selection this frame.
@@ -133,6 +136,7 @@ impl Default for ViewportLabelSelectionState {
             text_to_copy: Default::default(),
             last_copied_galley_rect: Default::default(),
             select_all: false,
+            keep_selection: false,
             painted_selections: Default::default(),
         }
     }
@@ -187,6 +191,18 @@ impl LabelSelectionState {
             plugin.states.entry(ctx.viewport_id()).or_default().select_all = true;
         } else if let Some(state) = plugin.states.get_mut(&ctx.viewport_id()) {
             state.select_all = false;
+        }
+    }
+
+    /// claude-factory patch: while `on`, a press outside the labels (e.g. on a context menu item) or Esc does not clear
+    /// the selection. Set it every frame; it is not remembered.
+    pub fn keep_selection(ctx: &Context, on: bool) {
+        let plugin = ctx.plugin::<Self>();
+        let mut plugin = plugin.lock();
+        if on {
+            plugin.states.entry(ctx.viewport_id()).or_default().keep_selection = true;
+        } else if let Some(state) = plugin.states.get_mut(&ctx.viewport_id()) {
+            state.keep_selection = false;
         }
     }
 
@@ -289,7 +305,7 @@ impl ViewportLabelSelectionState {
         let clicked_something_else = ui.input(|i| i.pointer.any_pressed()) && !self.any_hovered;
         let delected_everything = pressed_escape || clicked_something_else;
 
-        if delected_everything {
+        if delected_everything && !self.keep_selection {
             self.selection = None;
         }
 

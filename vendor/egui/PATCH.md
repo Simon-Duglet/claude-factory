@@ -6,7 +6,7 @@ conversation. Stock egui drops the selection as soon as one end of it scrolls ou
 
 - `widgets/label.rs`: a selectable label out of view still goes through the selection while one is active.
 - `text_selection/label_text_selection.rs`:
-  - `LabelSelectionState::is_active(ctx)` and `LabelSelectionState::select_all(ctx, on)` (every label drawn while on is fully selected and copied).
+  - `LabelSelectionState::is_active(ctx)` and `LabelSelectionState::select_all(ctx, on)` (every label drawn while on is fully selected and copied), and `keep_selection(ctx, on)` (a press outside the labels, such as on a context menu item, does not clear the selection).
   - The drag logic no longer clips label rects to the view, and a pointer dragged out of the scroll area counts as over the label it lines up with.
 
 When bumping egui, re-apply these changes (or drop the vendor directory and the `[patch.crates-io]` entry if upstream supports it).

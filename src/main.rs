@@ -1554,7 +1554,9 @@ fn keep_label_selection(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         // Labels gather the selected text on a Copy event; egui copies it at the end of the pass, after any TextEdit.
         ui.input_mut(|i| i.events.push(Event::Copy));
     }
-    let keep = ui.input(|i| i.pointer.button_down(Secondary) || i.pointer.button_released(Secondary)) || ui.ctx().any_popup_open();
+    let keep = ui.input(|i| i.pointer.button_down(Secondary) || i.pointer.button_released(Secondary)) || egui::Popup::is_any_open(ui.ctx());
+    // egui clears the selection at the end of the pass on a press that is not on a label, such as one on the menu's Copy selection.
+    LabelSelectionState::keep_selection(ui.ctx(), keep);
     let all = select_all_state(ui, keep);
     LabelSelectionState::select_all(ui.ctx(), all);
     add(ui);
@@ -1565,6 +1567,8 @@ fn keep_label_selection(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         if let Some(saved) = ui.data(|d| d.get_temp::<LabelSelectionState>(snapshot)) {
             *plugin.lock() = saved;
         }
+        // The snapshot has the flag off; egui looks at it at the end of the pass.
+        LabelSelectionState::keep_selection(ui.ctx(), true);
     } else {
         let now = plugin.lock().clone();
         ui.data_mut(|d| d.insert_temp(snapshot, now));
