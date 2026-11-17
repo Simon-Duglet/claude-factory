@@ -95,3 +95,6 @@ MIT, see [LICENSE](LICENSE).
 
 The bundled Ubuntu Regular font (`res/fonts/Ubuntu-Regular.ttf`) is under the Ubuntu Font Licence 1.0, see
 [res/fonts/UFL.txt](res/fonts/UFL.txt).
+
+The bundled DejaVu Sans font (`res/fonts/DejaVuSans.ttf`), a fallback for symbols, is under the Bitstream Vera licence
+(DejaVu changes are public domain), see [res/fonts/DejaVuSans-LICENSE.txt](res/fonts/DejaVuSans-LICENSE.txt).

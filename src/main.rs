@@ -105,9 +105,13 @@ fn font_definitions() -> egui::FontDefinitions {
         }
     }
     fonts.font_data.remove("Ubuntu-Light");
-    // Ubuntu and the emoji fonts lack common symbols such as arrows (← →) and ● that the UI and agents' messages
-    // use, which drew as empty boxes; Hack, already loaded for code, has them.
-    fonts.families.entry(egui::FontFamily::Proportional).or_default().push("Hack".into());
+    // Ubuntu and the emoji fonts lack common symbols that the UI and agents' messages use, which drew as empty
+    // boxes: Hack, already loaded for code, has the arrows (← →) and ●, and DejaVu Sans the crosses (✕ ✗ ✘).
+    fonts.font_data.insert(
+        "DejaVuSans".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../res/fonts/DejaVuSans.ttf"))),
+    );
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().extend(["Hack".into(), "DejaVuSans".into()]);
     fonts
 }
 
@@ -1699,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ui_font_has_every_symbol_the_ui_uses() {
+    fn the_ui_font_has_every_symbol_the_ui_and_agents_use() {
         let symbols = ui_symbols();
         // Guards the scan itself: these are known to be in the UI.
         assert!(['←', '●', '🗙', '…'].iter().all(|c| symbols.contains(c)), "{symbols:?}");
@@ -1709,7 +1713,13 @@ mod tests {
             .iter()
             .map(|name| skrifa::FontRef::new(defs.font_data[name].font.as_ref()).expect("a valid font"))
             .collect();
-        let missing: String = symbols.into_iter().filter(|c| faces.iter().all(|f| f.charmap().map(*c).is_none())).collect();
+        // Symbols agents often write, beyond those in the UI's own strings.
+        let in_messages = "✓✔✗✘✕✖❌✅⚠★→←↑↓↔⇒≥≤≠≈±×•●○▶◀─│┌┐└┘├┤┼…–—“”°™©®€π√∞";
+        let missing: String = symbols
+            .into_iter()
+            .chain(in_messages.chars())
+            .filter(|c| faces.iter().all(|f| f.charmap().map(*c).is_none()))
+            .collect();
         assert!(missing.is_empty(), "drawn as empty boxes: {missing}");
     }
 
