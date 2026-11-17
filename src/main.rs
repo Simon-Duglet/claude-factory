@@ -807,6 +807,17 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
                 .desired_width(f32::INFINITY),
         );
         ui.end_row();
+        ui.label("Lead model");
+        ui.horizontal(|ui| {
+            let shown = if team.lead_model.is_empty() { "default" } else { team.lead_model.as_str() };
+            egui::ComboBox::from_id_salt("lead_model").selected_text(shown).show_ui(ui, |ui| {
+                for model in MODELS {
+                    ui.selectable_value(&mut team.lead_model, model.to_string(), if model.is_empty() { "default" } else { model });
+                }
+            });
+            ui.label(egui::RichText::new("Also used by agents set to \"lead's model\"").weak());
+        });
+        ui.end_row();
         ui.label("Team rules");
         ui.add(
             egui::TextEdit::multiline(&mut team.rules)
@@ -1348,12 +1359,12 @@ fn start_team(team: &Team, running: &mut Running, tags: &mut HashMap<String, Str
 
 /// Starts the lead or the member called `name`, on a new session or resuming `resume`.
 fn start_seat(team: &Team, name: &str, tag: &str, resume: Option<&str>) -> Option<Agent> {
-    // The lead runs on the default model; each member on its own pick.
+    // The lead runs on the team's lead model; each member on its own pick, or the lead's when it has none.
     let (model, system_prompt) = if name == team.lead_name() {
-        (String::new(), prompt::render_lead(team, tag))
+        (team.lead_model.clone(), prompt::render_lead(team, tag))
     } else {
         let m = team.members.iter().find(|m| m.name == name)?;
-        (m.model.clone(), prompt::render_member(team, m, tag))
+        (team.model_of(m), prompt::render_member(team, m, tag))
     };
     let session_name = prompt::tagged(name.trim(), tag);
     let launch = runner::Launch {
