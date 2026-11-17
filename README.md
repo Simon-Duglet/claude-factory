@@ -92,3 +92,6 @@ the installed binary.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+The bundled Ubuntu Regular font (`res/fonts/Ubuntu-Regular.ttf`) is under the Ubuntu Font Licence 1.0, see
+[res/fonts/UFL.txt](res/fonts/UFL.txt).
