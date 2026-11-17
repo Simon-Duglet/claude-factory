@@ -28,3 +28,7 @@ egui_commonmark = { version = "0.25", default-features = false, features = ["pul
 # egui with a patch for text selection that spans more than the visible part of the chat log: see vendor/egui/PATCH.md.
 [patch.crates-io]
 egui = { path = "vendor/egui" }
+
+[dev-dependencies]
+# Already in egui's tree; reads font charmaps in the glyph-coverage test (egui's own check misreports emoji glyphs).
+skrifa = { version = "0.44", default-features = false, features = ["std"] }

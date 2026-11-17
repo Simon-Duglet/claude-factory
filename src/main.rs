@@ -87,6 +87,13 @@ fn set_text_rendering(mut contexts: EguiContexts, mut done: Local<bool>) -> Resu
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
+    ctx.set_fonts(font_definitions());
+    ctx.all_styles_mut(|style| style.visuals.text_options.subpixel_binning = false);
+    *done = true;
+    Ok(())
+}
+
+fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "Ubuntu-Regular".into(),
@@ -98,10 +105,15 @@ fn set_text_rendering(mut contexts: EguiContexts, mut done: Local<bool>) -> Resu
         }
     }
     fonts.font_data.remove("Ubuntu-Light");
-    ctx.set_fonts(fonts);
-    ctx.all_styles_mut(|style| style.visuals.text_options.subpixel_binning = false);
-    *done = true;
-    Ok(())
+    // Ubuntu and the emoji fonts lack common symbols that the UI and agents' messages use (← → ● ✕ ✗ ✘), which
+    // drew as empty boxes. DejaVu Sans has them with proportional spacing; Hack, already loaded for code, comes last
+    // for anything DejaVu lacks (its arrows fill a whole monospace cell, so "← Back" read as "←Back").
+    fonts.font_data.insert(
+        "DejaVuSans".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../res/fonts/DejaVuSans.ttf"))),
+    );
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().extend(["DejaVuSans".into(), "Hack".into()]);
+    fonts
 }
 
 fn setup_cameras(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) {
@@ -508,7 +520,7 @@ fn notifications(ctx: &egui::Context, rect: egui::Rect, f: &mut Factory) {
                     ui.horizontal(|ui| {
                         ui.strong(team);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                            if ui.small_button("🗙").on_hover_text("Dismiss").clicked() {
                                 dismiss = Some(i);
                             }
                         });
@@ -1127,7 +1139,7 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
             for (i, path) in attachments.iter().enumerate() {
                 let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                 ui.label(format!("📎 {name}")).on_hover_text(path.display().to_string());
-                if ui.small_button("✕").on_hover_text("Remove this attachment").clicked() {
+                if ui.small_button("🗙").on_hover_text("Remove this attachment").clicked() {
                     removed = Some(i);
                 }
             }
@@ -1672,7 +1684,45 @@ fn scroll_while_selecting(ui: &egui::Ui) {
 
 #[cfg(test)]
 mod tests {
-    use super::{question_answers, slash_query};
+    use super::{font_definitions, question_answers, slash_query};
+    use bevy_egui::egui;
+
+    /// Every non-ASCII character in the string literals of the files that build UI text, skipping comment lines.
+    fn ui_symbols() -> Vec<char> {
+        let sources = [include_str!("main.rs"), include_str!("runner.rs"), include_str!("history.rs"), include_str!("markdown.rs")];
+        let mut symbols: Vec<char> = sources
+            .iter()
+            .flat_map(|s| s.lines())
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .flat_map(|l| l.split('"').skip(1).step_by(2))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_ascii())
+            .collect();
+        symbols.sort_unstable();
+        symbols.dedup();
+        symbols
+    }
+
+    #[test]
+    fn the_ui_font_has_every_symbol_the_ui_and_agents_use() {
+        let symbols = ui_symbols();
+        // Guards the scan itself: these are known to be in the UI.
+        assert!(['←', '●', '🗙', '…'].iter().all(|c| symbols.contains(c)), "{symbols:?}");
+        use skrifa::MetadataProvider;
+        let defs = font_definitions();
+        let faces: Vec<skrifa::FontRef> = defs.families[&egui::FontFamily::Proportional]
+            .iter()
+            .map(|name| skrifa::FontRef::new(defs.font_data[name].font.as_ref()).expect("a valid font"))
+            .collect();
+        // Symbols agents often write, beyond those in the UI's own strings.
+        let in_messages = "✓✔✗✘✕✖❌✅⚠★→←↑↓↔⇒≥≤≠≈±×•●○▶◀─│┌┐└┘├┤┼…–—“”°™©®€π√∞";
+        let missing: String = symbols
+            .into_iter()
+            .chain(in_messages.chars())
+            .filter(|c| faces.iter().all(|f| f.charmap().map(*c).is_none()))
+            .collect();
+        assert!(missing.is_empty(), "drawn as empty boxes: {missing}");
+    }
 
     #[test]
     fn finds_the_slash_word_being_typed() {
