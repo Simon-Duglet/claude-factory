@@ -10,7 +10,18 @@ use std::sync::{Arc, Mutex};
 pub fn show(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let cache = ui.data_mut(|d| d.get_temp_mut_or_default::<Arc<Mutex<CommonMarkCache>>>(egui::Id::new("markdown_cache")).clone());
     let mut cache = cache.lock().unwrap();
-    ui.scope(|ui| CommonMarkViewer::new().show(ui, &mut cache, &autolink(text))).response
+    // egui_commonmark lays table cells out without wrapping, so a table with long cells is wider than the chat.
+    // Left in the log, it widened the panel to its maximum, laid the text after it out past the panel's edge, and
+    // moved the panel's separator line into the middle of the chat. In a horizontal scroll area the text still
+    // wraps at the visible width and only a wide table overflows, scrolling sideways within its message.
+    let id = ui.next_auto_id().with("markdown");
+    ui.scope(|ui| {
+        egui::ScrollArea::horizontal()
+            .id_salt(id)
+            .auto_shrink([false, true])
+            .show(ui, |ui| CommonMarkViewer::new().show(ui, &mut cache, &autolink(text)))
+    })
+    .response
 }
 
 /// Wraps bare http(s) URLs in `<...>` so they become links: CommonMark only links URLs written that way.
