@@ -16,6 +16,9 @@ pub fn show(ui: &mut egui::Ui, text: &str) -> egui::Response {
     // wraps at the visible width and only a wide table overflows, scrolling sideways within its message.
     let id = ui.next_auto_id().with("markdown");
     ui.scope(|ui| {
+        // A solid bar takes its own room under the message, only when it overflows; the default floating bar
+        // widened over the message's last line while hovered.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
         egui::ScrollArea::horizontal()
             .id_salt(id)
             .auto_shrink([false, true])
