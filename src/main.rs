@@ -105,13 +105,14 @@ fn font_definitions() -> egui::FontDefinitions {
         }
     }
     fonts.font_data.remove("Ubuntu-Light");
-    // Ubuntu and the emoji fonts lack common symbols that the UI and agents' messages use, which drew as empty
-    // boxes: Hack, already loaded for code, has the arrows (← →) and ●, and DejaVu Sans the crosses (✕ ✗ ✘).
+    // Ubuntu and the emoji fonts lack common symbols that the UI and agents' messages use (← → ● ✕ ✗ ✘), which
+    // drew as empty boxes. DejaVu Sans has them with proportional spacing; Hack, already loaded for code, comes last
+    // for anything DejaVu lacks (its arrows fill a whole monospace cell, so "← Back" read as "←Back").
     fonts.font_data.insert(
         "DejaVuSans".into(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../res/fonts/DejaVuSans.ttf"))),
     );
-    fonts.families.entry(egui::FontFamily::Proportional).or_default().extend(["Hack".into(), "DejaVuSans".into()]);
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().extend(["DejaVuSans".into(), "Hack".into()]);
     fonts
 }
 
