@@ -35,7 +35,7 @@ impl Role {
 pub struct Member {
     pub name: String,
     pub role: Role,
-    /// Empty means the lead decides (inherits the lead's model).
+    /// Empty means the lead's model (`Team::lead_model`).
     pub model: String,
     pub instructions: String,
 }
@@ -53,6 +53,9 @@ pub struct Team {
     /// Sessions started in this directory (or below) get the team. Empty = every session.
     pub directory: String,
     pub rules: String,
+    /// `--model` of the lead the app runs, and of members whose own model is empty. Empty = Claude Code's default.
+    #[serde(default)]
+    pub lead_model: String,
     pub members: Vec<Member>,
     /// `--permission-mode` of the sessions the app runs; nobody can answer a prompt in them.
     #[serde(default = "default_permission_mode")]
@@ -128,6 +131,7 @@ impl Team {
             enabled: true,
             directory: String::new(),
             rules: String::new(),
+            lead_model: String::new(),
             members: Vec::new(),
             permission_mode: default_permission_mode(),
             routines: Vec::new(),
@@ -143,6 +147,11 @@ impl Team {
     pub fn task_list_id(&self) -> String {
         let slug: String = self.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
         format!("claude-factory-{slug}")
+    }
+
+    /// The `--model` the app starts `member` with; empty = no flag, so Claude Code's default.
+    pub fn model_of(&self, member: &Member) -> String {
+        if member.model.trim().is_empty() { self.lead_model.clone() } else { member.model.clone() }
     }
 
     /// Where the app starts this team's sessions.
@@ -285,6 +294,27 @@ mod tests {
         assert_eq!(store.team_for_dir("/src/MyApp/Linux/Core").unwrap().name, "linux");
         assert_eq!(store.team_for_dir("/src/MyApp").unwrap().name, "myapp");
         assert_eq!(store.team_for_dir("/src/MyAppX").unwrap().name, "global");
+    }
+
+    #[test]
+    fn team_saved_before_the_lead_model_existed_still_loads() {
+        let old = r#"{"teams":[{"name":"Old","enabled":true,"directory":"","rules":"",
+            "members":[{"name":"Dev","role":"Developer","model":"","instructions":""}]}]}"#;
+        let store: Store = serde_json::from_str(old).unwrap();
+        assert_eq!(store.teams[0].lead_model, "");
+        assert_eq!(store.teams[0].members[0].name, "Dev");
+    }
+
+    #[test]
+    fn members_without_a_model_use_the_lead_model() {
+        let mut team = Team::new("T");
+        team.lead_model = "opus".into();
+        let mut own = Member::new("A", Role::Developer);
+        own.model = "haiku".into();
+        assert_eq!(team.model_of(&own), "haiku");
+        assert_eq!(team.model_of(&Member::new("B", Role::Qa)), "opus");
+        team.lead_model.clear();
+        assert_eq!(team.model_of(&Member::new("B", Role::Qa)), "");
     }
 
     #[test]
