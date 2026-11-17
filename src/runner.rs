@@ -5,7 +5,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Set on every agent the app starts, so the SessionStart hook does not add the lead prompt on top of the agent's own.
 pub const AGENT_ENV: &str = "CLAUDE_FACTORY_AGENT";
@@ -79,7 +79,26 @@ struct Shared {
     session_id: Option<String>,
     /// Tasks (background Bash, subagents) started but not yet notified as finished; the agent is waiting on them.
     open_tasks: std::collections::HashSet<String>,
+    /// When the session last wrote to stdout, or was last sent a message.
+    last_event: Option<Instant>,
+    /// Tool calls the model made that have no result yet; while one runs, silence is the tool, not the API.
+    running_tools: std::collections::HashSet<String>,
+    /// Automatic "continue" messages sent since the last turn that succeeded.
+    retries: u32,
+    /// When to send the next automatic "continue", after a turn cut off by a connection error.
+    retry_at: Option<Instant>,
+    /// The watchdog interrupted a stalled turn; the turn's end is then resumed like a connection error.
+    interrupted: bool,
 }
+
+/// Automatic "continue" messages in a row before the watchdog gives up and leaves the agent to the user.
+const MAX_RETRIES: u32 = 3;
+/// Wait after a connection error before resuming, so a VPN or route change can settle.
+const RETRY_DELAY: Duration = Duration::from_secs(20);
+/// A turn waiting on the model with no output this long is taken as a dead connection and interrupted.
+/// Claude Code's own watchdog (see the env in `Agent::start`) normally catches it within a minute; this is the backstop.
+const STALL: Duration = Duration::from_secs(10 * 60);
+const RESUME_PROMPT: &str = "The connection to the API dropped and your last turn was cut off. Continue where you left off.";
 
 /// An AskUserQuestion call the session is blocked on until the app answers its `can_use_tool` request.
 #[derive(Clone)]
@@ -128,6 +147,11 @@ impl Agent {
             .env("CLAUDE_CODE_TASK_LIST_ID", launch.task_list_id)
             // Task tools are only on by default for some models.
             .env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+            // A VPN or route change silently kills open API streams. Claude Code drops a stream after this long
+            // without bytes (180 s by default) and retries it; the API sends pings, so a live stream is never idle that long.
+            .env("CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS", "60000")
+            // Same for a request that never gets its response headers.
+            .env("CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS", "60000")
             .current_dir(launch.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -156,7 +180,10 @@ impl Agent {
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                    apply(&mut s.lock().unwrap(), &event);
+                    let mut s = s.lock().unwrap();
+                    s.last_event = Some(Instant::now());
+                    apply(&mut s, &event);
+                    drop(s);
                     r();
                 }
             }
@@ -169,6 +196,9 @@ impl Agent {
         let weak = Arc::downgrade(&shared);
         let d = display.clone();
         thread::spawn(move || grab_loop(weak, d));
+        let weak = Arc::downgrade(&shared);
+        let r = repaint.clone();
+        thread::spawn(move || watchdog(weak, r));
 
         let stderr = child.stderr.take().expect("piped stderr");
         let s = shared.clone();
@@ -199,6 +229,8 @@ impl Agent {
         if sent {
             shared.entries.push(Entry::User(text));
             shared.status = Some(Status::Working);
+            shared.last_event = Some(Instant::now());
+            shared.retry_at = None;
         } else {
             shared.entries.push(Entry::Error("The session is not running; message not sent.".into()));
         }
@@ -428,7 +460,11 @@ fn apply(shared: &mut Shared, event: &Value) {
     }
     match (event["type"].as_str(), event["subtype"].as_str()) {
         (Some("command_lifecycle"), _) => match event["state"].as_str() {
-            Some("started") => shared.status = Some(Status::Working),
+            Some("started") => {
+                shared.status = Some(Status::Working);
+                // Something else (a teammate's message) started a turn: no need to resume the cut-off one.
+                shared.retry_at = None;
+            }
             Some("completed") => shared.status = Some(Status::Idle),
             _ => {}
         },
@@ -437,6 +473,9 @@ fn apply(shared: &mut Shared, event: &Value) {
                 match block["type"].as_str() {
                     Some("text") => shared.entries.push(Entry::Assistant(block["text"].as_str().unwrap_or("").into())),
                     Some("tool_use") => {
+                        if let Some(id) = block["id"].as_str() {
+                            shared.running_tools.insert(id.into());
+                        }
                         shared.entries.push(Entry::Tool(tool_summary(block)));
                         match block["name"].as_str() {
                             Some("mcp__nested-desktop__start_desktop") => shared.desktop = true,
@@ -461,6 +500,9 @@ fn apply(shared: &mut Shared, event: &Value) {
         (Some("user"), _) => match &event["message"]["content"] {
             Value::String(text) => shared.entries.push(Entry::Incoming { from: "another session".into(), text: text.clone() }),
             Value::Array(blocks) => {
+                for b in blocks.iter().filter(|b| b["type"] == "tool_result") {
+                    shared.running_tools.remove(b["tool_use_id"].as_str().unwrap_or(""));
+                }
                 for b in blocks.iter().filter(|b| b["type"] == "text") {
                     let text = b["text"].as_str().unwrap_or("").into();
                     shared.entries.push(Entry::Incoming { from: "another session".into(), text });
@@ -498,12 +540,72 @@ fn apply(shared: &mut Shared, event: &Value) {
         }
         (Some("result"), _) => {
             shared.status = Some(Status::Idle);
-            if event["is_error"] == true {
-                let why = event["result"].as_str().or(event["subtype"].as_str()).unwrap_or("error");
-                shared.entries.push(Entry::Error(why.into()));
+            shared.running_tools.clear();
+            let interrupted = std::mem::take(&mut shared.interrupted);
+            let why = event["result"].as_str().or(event["subtype"].as_str()).unwrap_or("error").to_string();
+            let failed = event["is_error"] == true;
+            if !failed && !interrupted {
+                shared.retries = 0;
+                return;
+            }
+            if failed && !interrupted {
+                shared.entries.push(Entry::Error(why.clone()));
+            }
+            if interrupted || connection_error(&why) {
+                if shared.retries < MAX_RETRIES {
+                    shared.retry_at = Some(Instant::now() + RETRY_DELAY);
+                } else {
+                    shared.entries.push(Entry::Error(format!("Connection lost {MAX_RETRIES} times in a row; not resuming again. Send a message to continue.")));
+                }
             }
         }
         _ => {}
+    }
+}
+
+/// An error result caused by the network or the API being unreachable, as opposed to a usage limit or a bad request.
+fn connection_error(why: &str) -> bool {
+    let why = why.to_lowercase();
+    ["connection", "timed out", "timeout", "network", "fetch failed", "socket", "econn", "enotfound", "eai_again", "stream", "overloaded", "529", "502", "503", "504"]
+        .iter()
+        .any(|k| why.contains(k))
+}
+
+/// Recovers a session whose API connection died: resumes a turn cut off by a connection error, and interrupts a
+/// turn that has waited on the model with no output for `STALL`. Ends when the agent is dropped or exits.
+fn watchdog(shared: Weak<Mutex<Shared>>, repaint: impl Fn()) {
+    while let Some(shared) = shared.upgrade() {
+        let mut s = shared.lock().unwrap();
+        if s.status == Some(Status::Exited) {
+            return;
+        }
+        let now = Instant::now();
+        if s.retry_at.is_some_and(|t| now >= t) && s.status == Some(Status::Idle) {
+            s.retry_at = None;
+            s.retries += 1;
+            let line = json!({ "type": "user", "message": { "role": "user", "content": RESUME_PROMPT } }).to_string();
+            if s.write(&line) {
+                let n = s.retries;
+                s.entries.push(Entry::Error(format!("Connection lost, resuming… (attempt {n}/{MAX_RETRIES})")));
+                s.status = Some(Status::Working);
+                s.last_event = Some(now);
+                repaint();
+            }
+        } else if s.status == Some(Status::Working)
+            && !s.interrupted
+            && s.running_tools.is_empty()
+            && s.last_event.is_some_and(|t| now - t > STALL)
+        {
+            let req = json!({ "type": "control_request", "request_id": "watchdog-interrupt", "request": { "subtype": "interrupt" } });
+            if s.write(&req.to_string()) {
+                s.interrupted = true;
+                s.entries.push(Entry::Error(format!("No response from the API for {} min; interrupting the turn to resume it.", STALL.as_secs() / 60)));
+                repaint();
+            }
+        }
+        drop(s);
+        drop(shared);
+        thread::sleep(Duration::from_secs(5));
     }
 }
 
@@ -614,5 +716,31 @@ mod tests {
         let ids: Vec<&str> = s.questions.iter().map(|q| q.request_id.as_str()).collect();
         assert_eq!(ids, ["q2"]);
         assert_eq!(s.outbox, [("Bob".to_string(), "please test".to_string())]);
+    }
+
+    #[test]
+    fn schedules_resume_only_after_connection_errors() {
+        let mut s = Shared::default();
+        apply(&mut s, &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}));
+        assert!(s.running_tools.contains("t1"));
+        apply(&mut s, &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}}));
+        assert!(s.running_tools.is_empty());
+
+        apply(&mut s, &json!({"type":"result","is_error":true,"result":"Claude AI usage limit reached"}));
+        assert!(s.retry_at.is_none());
+        apply(&mut s, &json!({"type":"result","is_error":true,"result":"API Error: Connection error."}));
+        assert!(s.retry_at.is_some());
+        apply(&mut s, &json!({"type":"command_lifecycle","state":"started"}));
+        assert!(s.retry_at.is_none());
+
+        s.retries = MAX_RETRIES;
+        apply(&mut s, &json!({"type":"result","is_error":true,"result":"Request timed out."}));
+        assert!(s.retry_at.is_none());
+        apply(&mut s, &json!({"type":"result","subtype":"success","is_error":false}));
+        assert_eq!(s.retries, 0);
+
+        s.interrupted = true;
+        apply(&mut s, &json!({"type":"result","subtype":"error_during_execution","is_error":true}));
+        assert!(s.retry_at.is_some() && !s.interrupted);
     }
 }
