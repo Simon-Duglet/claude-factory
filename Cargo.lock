@@ -1980,6 +1980,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "skrifa 0.44.0",
  "winit",
  "x11rb 0.14.0",
 ]
