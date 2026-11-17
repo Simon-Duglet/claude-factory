@@ -56,7 +56,7 @@ fn main() {
         .add_plugins(scene::ScenePlugin)
         .insert_resource(Factory::new())
         .add_systems(Startup, setup_cameras)
-        .add_systems(EguiPrimaryContextPass, ui_system)
+        .add_systems(EguiPrimaryContextPass, (set_text_rendering, ui_system).chain())
         .add_systems(Update, set_window_icon)
         .run();
 }
@@ -77,6 +77,31 @@ fn set_window_icon(window: Query<Entity, With<PrimaryWindow>>, mut done: Local<b
         window.set_window_icon(winit::window::Icon::from_rgba(image.into_raw(), w, h).ok());
         *done = true;
     });
+}
+
+/// Sharper text than egui's defaults, at the same size so the layout does not move: Ubuntu Regular instead of
+/// the thin Ubuntu Light, whose stems came out as soft grey antialiasing, and glyphs snapped to whole pixels instead
+/// of drawn at fractional offsets (sub-pixel binning), which blurred them further.
+fn set_text_rendering(mut contexts: EguiContexts, mut done: Local<bool>) -> Result {
+    if *done {
+        return Ok(());
+    }
+    let ctx = contexts.ctx_mut()?;
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "Ubuntu-Regular".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../res/fonts/Ubuntu-Regular.ttf"))),
+    );
+    for family in fonts.families.values_mut() {
+        for name in family.iter_mut().filter(|n| *n == "Ubuntu-Light") {
+            *name = "Ubuntu-Regular".into();
+        }
+    }
+    fonts.font_data.remove("Ubuntu-Light");
+    ctx.set_fonts(fonts);
+    ctx.all_styles_mut(|style| style.visuals.text_options.subpixel_binning = false);
+    *done = true;
+    Ok(())
 }
 
 fn setup_cameras(mut commands: Commands, mut egui_settings: ResMut<EguiGlobalSettings>) {
