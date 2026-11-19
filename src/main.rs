@@ -10,6 +10,7 @@ mod scene;
 mod setup;
 mod tasks;
 mod team;
+mod usage;
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{CameraOutputMode, Viewport};
@@ -45,6 +46,7 @@ fn main() {
         session_start();
         return;
     }
+    usage::start();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -451,6 +453,7 @@ fn ui_system(
                     Err(e) => format!("Import failed: {e}"),
                 };
             }
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), usage_panel);
             ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::hover());
         })
         .response
@@ -2001,4 +2004,55 @@ mod tests {
         assert_eq!(slash_query("/simplify "), None);
         assert_eq!(slash_query(""), None);
     }
+}
+
+/// "Your usage limits" at the bottom of the teams panel. Drawn bottom-up, so rows go in reverse.
+fn usage_panel(ui: &mut egui::Ui) {
+    let Some(usage) = usage::latest() else { return };
+    let Some(usage) = usage else {
+        ui.weak("Usage unavailable");
+        ui.separator();
+        return;
+    };
+    let mut rows: Vec<(&str, String, f32)> = Vec::new();
+    for (name, w) in [("5-hour limit", &usage.five_hour), ("Weekly \u{b7} all models", &usage.seven_day)] {
+        let Some(w) = w else { continue };
+        let pct = w.utilization.unwrap_or(0.0);
+        let reset = w.resets_at.as_deref().and_then(usage::reset_label);
+        let detail = match reset {
+            Some(r) => format!("Resets {r} \u{b7} {pct:.0}%"),
+            None => format!("{pct:.0}%"),
+        };
+        rows.push((name, detail, (pct / 100.0) as f32));
+    }
+    if let Some(e) = usage.extra_usage.as_ref().filter(|e| e.is_enabled)
+        && let Some(limit) = e.monthly_limit.filter(|l| *l > 0.0)
+    {
+        let used = e.used_credits.unwrap_or(0.0);
+        rows.push(("Usage credits", format!("{} of {}", dollars(used / 100.0), dollars(limit / 100.0)), (used / limit) as f32));
+    }
+    let blue = Color32::from_rgb(0x4a, 0x90, 0xe2);
+    ui.add_space(4.0);
+    for (name, detail, frac) in rows.iter().rev() {
+        ui.add_space(4.0);
+        ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).desired_height(3.0).fill(blue).corner_radius(1.5));
+        ui.weak(detail);
+        ui.label(*name);
+    }
+    ui.strong("Your usage limits");
+    ui.separator();
+}
+
+/// `$1,000.00`.
+fn dollars(v: f64) -> String {
+    let cents = (v * 100.0).round() as i64;
+    let whole = (cents / 100).to_string();
+    let mut grouped = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("${grouped}.{:02}", cents % 100)
 }
