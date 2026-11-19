@@ -344,6 +344,11 @@ impl Plugin for ScenePlugin {
     }
 }
 
+/// Particles drawn per 800x600 logical pixels of scene, so the density on screen stays the same at any size.
+const PARTICLES_PER_SCREEN: f32 = 140.0;
+/// Upper bound on particles, enough to fill a large 4K viewport at that density.
+const MAX_PARTICLES: usize = 1200;
+
 /// The scene's size in world units: the viewport, grown by the camera's zoom-out.
 fn view_size(camera: &Camera, zoom: &Zoom) -> Vec2 {
     camera.logical_viewport_size().unwrap_or(Vec2::new(800.0, 600.0)) * zoom.0
@@ -421,7 +426,7 @@ fn sync_nodes(
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (seed >> 8) as f32 / (1u32 << 24) as f32
         };
-        effects.stars = (0..140).map(|_| (Vec2::new(next() - 0.5, next() - 0.5), next() * TAU)).collect();
+        effects.stars = (0..MAX_PARTICLES).map(|_| (Vec2::new(next() - 0.5, next() - 0.5), next() * TAU)).collect();
     }
 
     for (entity, node, _) in &nodes {
@@ -785,10 +790,10 @@ fn draw(
     effects: Res<Effects>,
     nodes: Query<(&Node, &Transform)>,
     zoom: Res<Zoom>,
+    view: Res<UserView>,
     mut clear_color: ResMut<ClearColor>,
 ) {
     let t = time.elapsed_secs();
-    let size = view_size(&camera, &zoom);
     let palette = input.theme.palette();
     let text = srgb(palette.text);
 
@@ -796,10 +801,17 @@ fn draw(
         clear_color.0 = input.theme.clear();
     }
     // Gizmos draw over the meshes, so particles keep clear of each node and its labels; edges are drawn after them.
+    // Particles live in screen space: they cover exactly what the camera shows (fit zoom, the user's zoom and pan),
+    // keep their on-screen size, and their count follows the viewport's area so big windows don't look sparse.
     let clear: Vec<Vec2> = nodes.iter().map(|(_, t)| t.translation.truncate()).collect();
-    for (unit, phase) in &effects.stars {
+    let screen = camera.logical_viewport_size().unwrap_or(Vec2::new(800.0, 600.0));
+    let scale = zoom.0 * view.zoom;
+    let visible = screen * scale;
+    let count = ((screen.x * screen.y / (800.0 * 600.0) * PARTICLES_PER_SCREEN) as usize).max(60).min(effects.stars.len());
+    for (unit, phase) in effects.stars.iter().take(count) {
         let (unit, radius, color) = input.theme.particle(*unit, *phase, t);
-        let p = unit * size;
+        let p = view.pan + unit * visible;
+        let radius = radius * scale;
         if clear.iter().any(|c| (p.x - c.x).abs() < 75.0 && p.y < c.y + 60.0 && p.y > c.y - 110.0) {
             continue;
         }
