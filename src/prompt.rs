@@ -18,8 +18,11 @@ pub fn render(team: &Team) -> String {
     );
     for m in &team.members {
         let _ = write!(out, "- **{}**: {}", m.name.trim(), m.role_label());
-        if !m.model.trim().is_empty() {
-            let _ = write!(out, " (model: {})", m.model.trim());
+        let model = Some(team.own_model(m)).filter(|v| !v.is_empty()).map(|v| format!("model: {v}"));
+        let effort = Some(team.own_effort(m)).filter(|v| !v.is_empty()).map(|v| format!("effort: {v}"));
+        let settings: Vec<String> = model.into_iter().chain(effort).collect();
+        if !settings.is_empty() {
+            let _ = write!(out, " ({})", settings.join(", "));
         }
         if !m.prompt(&team.roles).trim().is_empty() {
             let _ = write!(out, ". {}", m.prompt(&team.roles).trim());
@@ -146,7 +149,15 @@ mod tests {
         qa.model = "sonnet".into();
         team.members.push(qa);
 
+        let mut tester = crate::team::TeamRole::new("Tester", "");
+        tester.effort = "high".into();
+        team.roles.push(tester);
+        let mut carol = Member::new("Carol", Role::Custom);
+        carol.team_role = "Tester".into();
+        team.members.push(carol);
+
         let text = render(&team);
+        assert!(text.contains("- **Carol**: Tester (effort: high)\n"));
         assert!(text.starts_with("# Agent team: Linux MyApp\n"));
         assert!(text.contains("Never create PRs."));
         assert!(text.contains("- **Alice**: Developer. Implements"));

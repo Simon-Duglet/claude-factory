@@ -35,8 +35,11 @@ impl Role {
 pub struct Member {
     pub name: String,
     pub role: Role,
-    /// Empty means the lead's model (`Team::lead_model`).
+    /// Empty means its role's model, else the lead's (`Team::model_of`).
     pub model: String,
+    /// `--effort`; empty means its role's, else the lead's (`Team::effort_of`).
+    #[serde(default)]
+    pub effort: String,
     /// The member's own prompt, used when `override_prompt` is on.
     pub instructions: String,
     /// The name of one of the team's roles (Roles tab); empty = the built-in `role`.
@@ -49,7 +52,7 @@ pub struct Member {
 
 impl Member {
     pub fn new(name: &str, role: Role) -> Self {
-        Self { name: name.into(), role, model: String::new(), instructions: String::new(), team_role: String::new(), override_prompt: false }
+        Self { name: name.into(), role, model: String::new(), effort: String::new(), instructions: String::new(), team_role: String::new(), override_prompt: false }
     }
 
     /// What the member is called in prompts and the graph: its team role, else its built-in role.
@@ -78,6 +81,9 @@ pub struct Team {
     /// `--model` of the lead the app runs, and of members whose own model is empty. Empty = Claude Code's default.
     #[serde(default)]
     pub lead_model: String,
+    /// `--effort` of the lead, and of members whose own and role's effort are empty. Empty = no flag.
+    #[serde(default)]
+    pub lead_effort: String,
     pub members: Vec<Member>,
     /// `--permission-mode` of the sessions the app runs; nobody can answer a prompt in them.
     #[serde(default = "default_permission_mode")]
@@ -94,6 +100,18 @@ pub struct Team {
 pub struct TeamRole {
     pub name: String,
     pub prompt: String,
+    /// Default `--model` of the role's agents; empty = the lead's.
+    #[serde(default)]
+    pub model: String,
+    /// Default `--effort` of the role's agents; empty = the lead's.
+    #[serde(default)]
+    pub effort: String,
+}
+
+impl TeamRole {
+    pub fn new(name: &str, prompt: &str) -> Self {
+        Self { name: name.into(), prompt: prompt.into(), model: String::new(), effort: String::new() }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,6 +181,7 @@ impl Team {
             directory: String::new(),
             rules: String::new(),
             lead_model: String::new(),
+            lead_effort: String::new(),
             members: Vec::new(),
             permission_mode: default_permission_mode(),
             routines: Vec::new(),
@@ -181,9 +200,30 @@ impl Team {
         format!("claude-factory-{slug}")
     }
 
-    /// The `--model` the app starts `member` with; empty = no flag, so Claude Code's default.
+    /// The team role `member` is in, matched by name like `Member::prompt`.
+    pub fn role_of(&self, member: &Member) -> Option<&TeamRole> {
+        let label = member.role_label();
+        self.roles.iter().find(|r| r.name.trim() == label)
+    }
+
+    /// The member's own model, else its role's; empty when neither is set.
+    pub fn own_model(&self, member: &Member) -> String {
+        first_set([&member.model, self.role_of(member).map_or("", |r| &r.model)])
+    }
+
+    /// The member's own effort, else its role's; empty when neither is set.
+    pub fn own_effort(&self, member: &Member) -> String {
+        first_set([&member.effort, self.role_of(member).map_or("", |r| &r.effort)])
+    }
+
+    /// The `--model` the app starts `member` with: its own, else its role's, else the lead's; empty = no flag.
     pub fn model_of(&self, member: &Member) -> String {
-        if member.model.trim().is_empty() { self.lead_model.clone() } else { member.model.clone() }
+        first_set([&self.own_model(member), &self.lead_model])
+    }
+
+    /// The `--effort` the app starts `member` with, in the same order as `model_of`; empty = no flag.
+    pub fn effort_of(&self, member: &Member) -> String {
+        first_set([&self.own_effort(member), &self.lead_effort])
     }
 
     /// Where the app starts this team's sessions.
@@ -223,6 +263,10 @@ impl Default for Store {
     fn default() -> Self {
         Self { teams: Vec::new(), desktop_preview: true, history: Vec::new(), theme: Default::default() }
     }
+}
+
+fn first_set<const N: usize>(values: [&str; N]) -> String {
+    values.iter().map(|v| v.trim()).find(|v| !v.is_empty()).unwrap_or("").to_string()
 }
 
 fn yes() -> bool {
@@ -295,7 +339,7 @@ mod tests {
         let old: Member = serde_json::from_str(r#"{"name":"A","role":"Developer","model":"","instructions":"mine"}"#).unwrap();
         assert!(old.override_prompt);
         assert_eq!(old.prompt(&[]), "mine");
-        let roles = vec![TeamRole { name: "Developer".into(), prompt: "team dev".into() }, TeamRole { name: "Writer".into(), prompt: "writes".into() }];
+        let roles = vec![TeamRole::new("Developer", "team dev"), TeamRole::new("Writer", "writes")];
         let mut m = Member::new("B", Role::Developer);
         assert!(!m.override_prompt);
         assert_eq!(m.prompt(&[]), Role::Developer.default_instructions());
@@ -365,6 +409,33 @@ mod tests {
         assert_eq!(team.model_of(&Member::new("B", Role::Qa)), "opus");
         team.lead_model.clear();
         assert_eq!(team.model_of(&Member::new("B", Role::Qa)), "");
+    }
+
+    #[test]
+    fn model_and_effort_go_member_then_role_then_lead() {
+        let mut team = Team::new("T");
+        team.lead_model = "opus".into();
+        let mut role = TeamRole::new("QA", "");
+        role.model = "sonnet".into();
+        role.effort = "high".into();
+        team.roles.push(role);
+        let qa = Member::new("B", Role::Qa);
+        assert_eq!((team.model_of(&qa), team.effort_of(&qa)), ("sonnet".into(), "high".into()));
+        let mut own = qa.clone();
+        own.model = "haiku".into();
+        own.effort = "low".into();
+        assert_eq!((team.model_of(&own), team.effort_of(&own)), ("haiku".into(), "low".into()));
+        let dev = Member::new("A", Role::Developer);
+        assert_eq!((team.model_of(&dev), team.effort_of(&dev)), ("opus".into(), String::new()));
+        team.lead_effort = "max".into();
+        assert_eq!(team.effort_of(&dev), "max");
+    }
+
+    #[test]
+    fn roles_saved_before_model_and_effort_still_load() {
+        let old = r#"{"name":"Old","enabled":true,"directory":"","rules":"","members":[],"roles":[{"name":"QA","prompt":"p"}]}"#;
+        let team: Team = serde_json::from_str(old).unwrap();
+        assert_eq!((team.roles[0].model.as_str(), team.roles[0].effort.as_str(), team.lead_effort.as_str()), ("", "", ""));
     }
 
     #[test]

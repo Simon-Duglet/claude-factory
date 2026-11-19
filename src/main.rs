@@ -34,6 +34,8 @@ enum View {
 }
 
 const MODELS: [&str; 4] = ["", "opus", "sonnet", "haiku"];
+/// `claude --effort` levels; "" = no flag.
+const EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
 const IDLE: Color32 = Color32::from_rgb(242, 173, 56);
 const FAILED: Color32 = Color32::from_rgb(235, 82, 82);
 
@@ -891,7 +893,9 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
                     ui.selectable_value(&mut team.lead_model, model.to_string(), if model.is_empty() { "default" } else { model });
                 }
             });
-            ui.label(egui::RichText::new("Also used by agents set to \"lead's model\"").weak());
+            ui.label("Effort");
+            pick(ui, "lead_effort", &mut team.lead_effort, &EFFORTS, "default");
+            ui.label(egui::RichText::new("Also used by agents and roles left on \"lead's\"").weak());
         });
         ui.end_row();
         ui.label("Team rules");
@@ -986,12 +990,9 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
                     m.override_prompt = true;
                 }
                 ui.label("Model");
-                let shown = if m.model.is_empty() { "lead's model".to_string() } else { m.model.clone() };
-                egui::ComboBox::from_id_salt(("model", i)).selected_text(shown).show_ui(ui, |ui| {
-                    for model in MODELS {
-                        ui.selectable_value(&mut m.model, model.to_string(), if model.is_empty() { "lead's model" } else { model });
-                    }
-                });
+                pick(ui, ("model", i), &mut m.model, &MODELS, "role's / lead's");
+                ui.label("Effort");
+                pick(ui, ("effort", i), &mut m.effort, &EFFORTS, "role's / lead's");
                 // Members are laid out left to right in this order, so these move the node in the graph.
                 if ui.add_enabled(i > 0, egui::Button::new("◀")).on_hover_text("Move left in the graph").clicked() {
                     swap = Some(i - 1);
@@ -1038,9 +1039,19 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
     });
 }
 
+/// A dropdown over `options`, where "" is shown as `unset`.
+fn pick(ui: &mut egui::Ui, id: impl egui::AsIdSalt, value: &mut String, options: &[&str], unset: &str) {
+    let shown = if value.is_empty() { unset } else { value.as_str() }.to_string();
+    egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
+        for o in options {
+            ui.selectable_value(value, o.to_string(), if o.is_empty() { unset } else { o });
+        }
+    });
+}
+
 fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
     ui.heading("Roles");
-    ui.weak("Default prompts for this team's agents. An agent uses its role's prompt here, and follows edits to it, unless \"Override role prompt\" is ticked on it in Design. A role named Developer, QA or Reviewer replaces that built-in role's prompt.");
+    ui.weak("Default prompts for this team's agents. An agent uses its role's prompt, model and effort here, and follows edits to them, unless \"Override role prompt\" is ticked on it in Design. A role named Developer, QA or Reviewer replaces that built-in role's prompt.");
     let mut remove = None;
     let mut renamed = None;
     for (i, r) in team.roles.iter_mut().enumerate() {
@@ -1052,6 +1063,10 @@ fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
                 if r.name.trim() != before {
                     renamed = Some((before.clone(), r.name.trim().to_string()));
                 }
+                ui.label("Model");
+                pick(ui, ("role_model", i), &mut r.model, &MODELS, "lead's");
+                ui.label("Effort");
+                pick(ui, ("role_effort", i), &mut r.effort, &EFFORTS, "lead's");
                 if ui.button("Delete").clicked() {
                     remove = Some(i);
                 }
@@ -1075,14 +1090,14 @@ fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
     }
     ui.horizontal(|ui| {
         if ui.button("+ Role").clicked() {
-            team.roles.push(team::TeamRole { name: format!("Role {}", team.roles.len() + 1), prompt: String::new() });
+            team.roles.push(team::TeamRole::new(&format!("Role {}", team.roles.len() + 1), ""));
         }
         // Starting points: copies of the built-in roles, skipped once a role of that name exists.
         for builtin in Role::ALL.into_iter().filter(|r| *r != Role::Custom) {
             if !team.roles.iter().any(|r| r.name == builtin.label())
                 && ui.button(format!("+ {}", builtin.label())).on_hover_text("Copy the built-in role").clicked()
             {
-                team.roles.push(team::TeamRole { name: builtin.label().into(), prompt: builtin.default_instructions().into() });
+                team.roles.push(team::TeamRole::new(builtin.label(), builtin.default_instructions()));
             }
         }
     });
@@ -1513,17 +1528,18 @@ fn start_team(team: &Team, running: &mut Running, tags: &mut HashMap<String, Str
 /// Starts the lead or the member called `name`, on a new session or resuming `resume`.
 fn start_seat(team: &Team, name: &str, tag: &str, resume: Option<&str>) -> Option<Agent> {
     // The lead runs on the team's lead model; each member on its own pick, or the lead's when it has none.
-    let (model, system_prompt) = if name == team.lead_name() {
-        (team.lead_model.clone(), prompt::render_lead(team, tag))
+    let (model, effort, system_prompt) = if name == team.lead_name() {
+        (team.lead_model.clone(), team.lead_effort.clone(), prompt::render_lead(team, tag))
     } else {
         let m = team.members.iter().find(|m| m.name == name)?;
-        (team.model_of(m), prompt::render_member(team, m, tag))
+        (team.model_of(m), team.effort_of(m), prompt::render_member(team, m, tag))
     };
     let session_name = prompt::tagged(name.trim(), tag);
     let launch = runner::Launch {
         name: &session_name,
         cwd: &team.working_dir(),
         model: &model,
+        effort: &effort,
         permission_mode: &team.permission_mode,
         system_prompt,
         task_list_id: &team.task_list_id(),

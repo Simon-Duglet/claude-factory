@@ -114,6 +114,8 @@ pub struct Launch<'a> {
     pub name: &'a str,
     pub cwd: &'a str,
     pub model: &'a str,
+    /// `--effort`; empty = no flag.
+    pub effort: &'a str,
     pub permission_mode: &'a str,
     pub system_prompt: String,
     /// Shared by every agent of the team, so the lead's tasks are the ones teammates update.
@@ -161,6 +163,9 @@ impl Agent {
         }
         if !launch.model.trim().is_empty() {
             cmd.args(["--model", launch.model.trim()]);
+        }
+        if !launch.effort.trim().is_empty() {
+            cmd.args(["--effort", launch.effort.trim()]);
         }
         // Own process group, so stopping the agent reaches its MCP servers and tool processes too.
         cmd.process_group(0);
