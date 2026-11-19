@@ -18,6 +18,10 @@ prompt at the start of every session, and the app shows which teammates are runn
 
 Then open the app. That's it. `./install.sh` warns if `claude` is not on your PATH.
 
+Building needs Rust (`cargo`) and a C compiler. If `cc` is missing, `./install.sh` installs it through `sudo`
+(`build-essential` on Debian/Ubuntu, `gcc` on Fedora and openSUSE, `base-devel` on Arch). No `-dev` packages are
+needed: the Wayland, X11 and xkbcommon libraries are loaded at runtime, and a desktop session already has them.
+
 The desktop entry and the `claude-factory` command run the installed binary, not `target/`: after any change,
 run `./install.sh` again and restart the app, or the fix is not what you are running.
 

@@ -9,7 +9,12 @@ repository = "https://github.com/Simon-Duglet/claude-factory"
 
 [dependencies]
 dirs = "7.0.0"
-bevy = { version = "0.19", default-features = false, features = ["2d"] }
+# The "2d" profile minus bevy_gilrs: gamepad support needs libudev-dev and the app has no use for it.
+bevy = { version = "0.19", default-features = false, features = [
+    "default_app", "2d_bevy_render", "scene", "picking",
+    "std", "bevy_winit", "bevy_clipboard", "default_font", "multi_threaded",
+    "x11", "wayland", "custom_cursor", "sysinfo_plugin",
+] }
 bevy_egui = "0.42"
 # Already in bevy's tree; used directly for the window icon.
 image = { version = "0.25", default-features = false, features = ["png"] }
