@@ -17,12 +17,12 @@ pub fn render(team: &Team) -> String {
          and do not spawn teammates outside this roster unless the user asks.\n",
     );
     for m in &team.members {
-        let _ = write!(out, "- **{}**: {}", m.name.trim(), m.role.label());
+        let _ = write!(out, "- **{}**: {}", m.name.trim(), m.role_label());
         if !m.model.trim().is_empty() {
             let _ = write!(out, " (model: {})", m.model.trim());
         }
-        if !m.instructions.trim().is_empty() {
-            let _ = write!(out, ". {}", m.instructions.trim());
+        if !m.prompt(&team.roles).trim().is_empty() {
+            let _ = write!(out, ". {}", m.prompt(&team.roles).trim());
         }
         out.push('\n');
     }
@@ -36,9 +36,9 @@ pub fn render_member(team: &Team, me: &Member, tag: &str) -> String {
     if !team.rules.trim().is_empty() {
         let _ = write!(out, "## Team rules\n{}\n\n", team.rules.trim());
     }
-    let _ = write!(out, "## You\nYou are **{}**, the {} of this team.", tagged(me.name.trim(), tag), me.role.label());
-    if !me.instructions.trim().is_empty() {
-        let _ = write!(out, " {}", me.instructions.trim());
+    let _ = write!(out, "## You\nYou are **{}**, the {} of this team.", tagged(me.name.trim(), tag), me.role_label());
+    if !me.prompt(&team.roles).trim().is_empty() {
+        let _ = write!(out, " {}", me.prompt(&team.roles).trim());
     }
     out.push_str(" The user talks to you directly from the Claude Factory app.\n");
     out.push_str(
@@ -56,9 +56,9 @@ pub fn render_member(team: &Team, me: &Member, tag: &str) -> String {
     let _ = writeln!(out, "- **{}**: Team lead. Assigns work; report back to it when you finish.", tagged(&team.lead_name(), tag));
     {
         for m in team.members.iter().filter(|m| m.name.trim() != me.name.trim()) {
-            let _ = write!(out, "- **{}**: {}", tagged(m.name.trim(), tag), m.role.label());
-            if !m.instructions.trim().is_empty() {
-                let _ = write!(out, ". {}", m.instructions.trim());
+            let _ = write!(out, "- **{}**: {}", tagged(m.name.trim(), tag), m.role_label());
+            if !m.prompt(&team.roles).trim().is_empty() {
+                let _ = write!(out, ". {}", m.prompt(&team.roles).trim());
             }
             out.push('\n');
         }
@@ -96,9 +96,9 @@ pub fn render_lead(team: &Team, tag: &str) -> String {
          turn for you, so end your turn after delegating instead of waiting.\n",
     );
     for m in &team.members {
-        let _ = write!(out, "- **{}**: {}", tagged(m.name.trim(), tag), m.role.label());
-        if !m.instructions.trim().is_empty() {
-            let _ = write!(out, ". {}", m.instructions.trim());
+        let _ = write!(out, "- **{}**: {}", tagged(m.name.trim(), tag), m.role_label());
+        if !m.prompt(&team.roles).trim().is_empty() {
+            let _ = write!(out, ". {}", m.prompt(&team.roles).trim());
         }
         out.push('\n');
     }
