@@ -89,6 +89,49 @@ struct Shared {
     retry_at: Option<Instant>,
     /// The watchdog interrupted a stalled turn; the turn's end is then resumed like a connection error.
     interrupted: bool,
+    /// Tokens and cost of the whole session, from the latest `result`.
+    usage: Usage,
+}
+
+/// Token counts and cost of a session. Claude reports them cumulatively in every `result` event, and restores
+/// them on `--resume`, so the latest one is the session's total.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost_usd: f64,
+}
+
+impl Usage {
+    pub fn tokens(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+
+    /// Sums `modelUsage` over every model the session used (subagents can run on another model).
+    fn from_result(event: &Value) -> Option<Self> {
+        let models = event["modelUsage"].as_object()?;
+        let mut u = Usage { cost_usd: event["total_cost_usd"].as_f64().unwrap_or(0.0), ..Default::default() };
+        for m in models.values() {
+            let n = |k: &str| m[k].as_u64().unwrap_or(0);
+            u.input += n("inputTokens");
+            u.output += n("outputTokens");
+            u.cache_read += n("cacheReadInputTokens");
+            u.cache_write += n("cacheCreationInputTokens");
+        }
+        Some(u)
+    }
+}
+
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, o: Self) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_read += o.cache_read;
+        self.cache_write += o.cache_write;
+        self.cost_usd += o.cost_usd;
+    }
 }
 
 /// Automatic "continue" messages in a row before the watchdog gives up and leaves the agent to the user.
@@ -122,6 +165,8 @@ pub struct Launch<'a> {
     pub task_list_id: &'a str,
     /// Continue this past session (`--resume`) instead of starting a new one.
     pub resume: Option<&'a str>,
+    /// Flags that limit the MCP servers (`mcp::launch_args`); empty = all of them.
+    pub mcp_args: Vec<String>,
 }
 
 /// One teammate: a long-lived `claude -p` session the app talks to over stream-json.
@@ -161,6 +206,7 @@ impl Agent {
         if let Some(id) = launch.resume {
             cmd.args(["--resume", id]);
         }
+        cmd.args(&launch.mcp_args);
         if !launch.model.trim().is_empty() {
             cmd.args(["--model", launch.model.trim()]);
         }
@@ -252,6 +298,10 @@ impl Agent {
     /// The latest snapshot of the agent's nested desktop, while it has one and the grab works.
     pub fn thumbnail(&self) -> Option<Arc<Thumbnail>> {
         self.shared.lock().unwrap().thumbnail.clone()
+    }
+
+    pub fn usage(&self) -> Usage {
+        self.shared.lock().unwrap().usage
     }
 
     pub fn session_id(&self) -> Option<String> {
@@ -544,6 +594,9 @@ fn apply(shared: &mut Shared, event: &Value) {
             }
         }
         (Some("result"), _) => {
+            if let Some(u) = Usage::from_result(event) {
+                shared.usage = u;
+            }
             shared.status = Some(Status::Idle);
             shared.running_tools.clear();
             let interrupted = std::mem::take(&mut shared.interrupted);
@@ -692,8 +745,12 @@ mod tests {
             {"type":"tool_use","name":"PushNotification","input":{"message":"PR #12 opened"}},
             {"type":"text","text":"done"}]}}));
         assert!(s.status == Some(Status::Working));
-        apply(&mut s, &json!({"type":"result","subtype":"success","is_error":false}));
+        apply(&mut s, &json!({"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.5,
+            "modelUsage":{"a":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4},
+                          "b":{"inputTokens":10,"outputTokens":20}}}));
         assert!(s.status == Some(Status::Idle));
+        assert_eq!(s.usage, Usage { input: 11, output: 22, cache_read: 3, cache_write: 4, cost_usd: 0.5 });
+        assert_eq!(s.usage.tokens(), 40);
         apply(&mut s, &json!({"type":"system","subtype":"task_started","task_id":"b1"}));
         assert!(s.status() == Status::Working);
         apply(&mut s, &json!({"type":"system","subtype":"task_notification","task_id":"b1","status":"completed"}));

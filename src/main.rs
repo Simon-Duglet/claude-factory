@@ -3,6 +3,7 @@ mod history;
 mod links;
 mod live;
 mod markdown;
+mod mcp;
 mod prompt;
 mod runner;
 mod scene;
@@ -1050,6 +1051,7 @@ fn pick(ui: &mut egui::Ui, id: impl egui::AsIdSalt, value: &mut String, options:
 }
 
 fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
+    let servers = mcp::available_cached(&team.working_dir());
     ui.heading("Roles");
     ui.weak("Default prompts for this team's agents. An agent uses its role's prompt, model and effort here, and follows edits to them, unless \"Override role prompt\" is ticked on it in Design. A role named Developer, QA or Reviewer replaces that built-in role's prompt.");
     let mut remove = None;
@@ -1077,6 +1079,7 @@ fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
                     .desired_rows(4)
                     .desired_width(f32::INFINITY),
             );
+            mcp_picker(ui, i, r, &servers);
         });
     }
     // Agents follow their role across a rename.
@@ -1100,6 +1103,31 @@ fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
                 team.roles.push(team::TeamRole::new(builtin.label(), builtin.default_instructions()));
             }
         }
+    });
+}
+
+/// "All" or a checklist of the servers the role's agents load. Takes effect when an agent next starts.
+fn mcp_picker(ui: &mut egui::Ui, i: usize, role: &mut team::TeamRole, servers: &[mcp::Server]) {
+    let mut all = role.mcp_servers.is_none();
+    ui.horizontal(|ui| {
+        ui.label("MCP servers");
+        if ui.checkbox(&mut all, "All").on_hover_text("Load every MCP server Claude Code would, as a normal session does").changed() {
+            // Unticking starts from the full list, so the user only unticks what the role doesn't need.
+            role.mcp_servers = if all { None } else { Some(servers.iter().map(|s| s.name.clone()).collect()) };
+        }
+    });
+    let Some(selected) = role.mcp_servers.as_mut() else { return };
+    let n = selected.iter().filter(|n| servers.iter().any(|s| s.name == **n)).count();
+    egui::CollapsingHeader::new(format!("{n} of {} servers selected", servers.len())).id_salt(("role_mcp", i)).show(ui, |ui| {
+        ui.weak("Applies when an agent next starts. Picking a claude.ai connector starts every server and hides the tools of the unpicked ones; otherwise unpicked servers don't start at all.");
+        ui.horizontal_wrapped(|ui| {
+            for s in servers {
+                let mut on = selected.contains(&s.name);
+                if ui.checkbox(&mut on, &s.name).on_hover_text(format!("{} server", s.source)).changed() {
+                    if on { selected.push(s.name.clone()) } else { selected.retain(|n| *n != s.name) }
+                }
+            }
+        });
     });
 }
 
@@ -1203,6 +1231,45 @@ struct Chat<'a> {
 /// Tallest the chat input grows before it scrolls inside.
 const CHAT_INPUT_MAX_HEIGHT: f32 = 160.0;
 
+/// "1.2M tok · $3.45" for a usage, with the token breakdown kept for the hover.
+fn usage_text(u: runner::Usage) -> String {
+    fn short(n: u64) -> String {
+        match n {
+            0..1_000 => n.to_string(),
+            1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+            _ => format!("{:.1}M", n as f64 / 1e6),
+        }
+    }
+    format!("{} tok · ${:.2}", short(u.tokens()), u.cost_usd)
+}
+
+fn usage_detail(u: runner::Usage) -> String {
+    format!("input {}, output {}, cache read {}, cache write {}", u.input, u.output, u.cache_read, u.cache_write)
+}
+
+/// The selected agent's tokens and cost, and the team's total with a per-agent breakdown on hover.
+fn usage_line(ui: &mut egui::Ui, team: &Team, running: &Running, chat_with: &str) {
+    let lead = team.lead_name();
+    let names = std::iter::once(lead.clone()).chain(team.members.iter().map(|m| m.name.clone()));
+    let per_agent: Vec<(String, runner::Usage)> =
+        names.filter_map(|n| running.get(&(team.name.clone(), n.clone())).map(|a| (n, a.usage()))).collect();
+    let mut total = runner::Usage::default();
+    per_agent.iter().for_each(|(_, u)| total += *u);
+    ui.horizontal(|ui| {
+        if let Some((_, u)) = per_agent.iter().find(|(n, _)| n == chat_with) {
+            let who = if chat_with == lead { "Lead" } else { chat_with };
+            ui.label(egui::RichText::new(format!("{who}: {}", usage_text(*u))).weak()).on_hover_text(usage_detail(*u));
+            ui.separator();
+        }
+        let breakdown: Vec<String> = per_agent
+            .iter()
+            .map(|(n, u)| format!("{}: {}", if *n == lead { "Lead" } else { n }, usage_text(*u)))
+            .collect();
+        ui.label(egui::RichText::new(format!("Team: {}", usage_text(total))).weak())
+            .on_hover_text(format!("{}\n\n{}\n\nCounted from each session's start, resumed sessions included; updated after every turn.", breakdown.join("\n"), usage_detail(total)));
+    });
+}
+
 fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryView, past: &[PastSession], messages: &mut Vec<(String, String)>) {
     let Chat { running, tags, chat_with, draft, attachments } = chat;
     let team_running = running.keys().any(|(t, _)| *t == team.name);
@@ -1242,6 +1309,9 @@ fn chat_view(ui: &mut egui::Ui, team: &mut Team, chat: Chat, hv: &mut HistoryVie
             hv.for_key = None;
         }
     });
+    if team_running {
+        usage_line(ui, team, running, chat_with);
+    }
     let key = (team.name.clone(), chat_with.clone());
     if hv.open {
         let live_id = running.get(&key).and_then(|a| a.session_id());
@@ -1528,22 +1598,25 @@ fn start_team(team: &Team, running: &mut Running, tags: &mut HashMap<String, Str
 /// Starts the lead or the member called `name`, on a new session or resuming `resume`.
 fn start_seat(team: &Team, name: &str, tag: &str, resume: Option<&str>) -> Option<Agent> {
     // The lead runs on the team's lead model; each member on its own pick, or the lead's when it has none.
-    let (model, effort, system_prompt) = if name == team.lead_name() {
-        (team.lead_model.clone(), team.lead_effort.clone(), prompt::render_lead(team, tag))
+    let cwd = team.working_dir();
+    let (model, effort, system_prompt, mcp_args) = if name == team.lead_name() {
+        (team.lead_model.clone(), team.lead_effort.clone(), prompt::render_lead(team, tag), Vec::new())
     } else {
         let m = team.members.iter().find(|m| m.name == name)?;
-        (team.model_of(m), team.effort_of(m), prompt::render_member(team, m, tag))
+        let mcp_args = team.role_of(m).and_then(|r| r.mcp_servers.as_ref()).map_or_else(Vec::new, |sel| mcp::launch_args(&mcp::available(&cwd), sel));
+        (team.model_of(m), team.effort_of(m), prompt::render_member(team, m, tag), mcp_args)
     };
     let session_name = prompt::tagged(name.trim(), tag);
     let launch = runner::Launch {
         name: &session_name,
-        cwd: &team.working_dir(),
+        cwd: &cwd,
         model: &model,
         effort: &effort,
         permission_mode: &team.permission_mode,
         system_prompt,
         task_list_id: &team.task_list_id(),
         resume,
+        mcp_args,
     };
     // Bevy redraws every frame, so the reader threads need no wake-up call.
     Agent::start(launch, || {}).inspect_err(|e| eprintln!("could not start {name}: {e}")).ok()
