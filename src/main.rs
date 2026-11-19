@@ -784,6 +784,31 @@ fn pick_file(save: bool, default_name: &str) -> Option<std::path::PathBuf> {
     (out.status.success() && !path.is_empty()).then(|| path.into())
 }
 
+/// Folder picked by `pick_dir`, as (team name, path), waiting for that team's editor to take it.
+static PICKED_DIR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+fn take_picked_dir(team: &str) -> Option<String> {
+    let mut picked = PICKED_DIR.lock().unwrap();
+    if picked.as_ref().is_some_and(|(t, _)| t == team) { picked.take().map(|(_, dir)| dir) } else { None }
+}
+
+/// Opens a folder chooser on a thread so the UI keeps running; needs zenity or kdialog, like `pick_file`.
+fn pick_dir(ctx: egui::Context, team: String, current: &str) {
+    let start = if current.is_empty() { dirs::home_dir().unwrap_or_default().display().to_string() } else { current.to_string() };
+    std::thread::spawn(move || {
+        use std::process::Command;
+        let zenity = Command::new("zenity").args(["--file-selection", "--directory", "--filename"]).arg(format!("{start}/")).output();
+        let Ok(out) = zenity.or_else(|_| Command::new("kdialog").args(["--getexistingdirectory", &start]).output()) else {
+            return;
+        };
+        let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !dir.is_empty() {
+            *PICKED_DIR.lock().unwrap() = Some((team, dir));
+            ctx.request_repaint();
+        }
+    });
+}
+
 fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &mut bool) {
     egui::Grid::new("team").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Name");
@@ -799,11 +824,20 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
         });
         ui.end_row();
         ui.label("Directory");
-        ui.add(
-            egui::TextEdit::singleline(&mut team.directory)
-                .hint_text("Only sessions started in this folder get the team (empty = every session)")
-                .desired_width(f32::INFINITY),
-        );
+        ui.horizontal(|ui| {
+            if let Some(dir) = take_picked_dir(&team.name) {
+                team.directory = dir;
+            }
+            let browse = ui.button("Browse…").on_hover_text("Choose the folder");
+            ui.add(
+                egui::TextEdit::singleline(&mut team.directory)
+                    .hint_text("Only sessions started in this folder get the team (empty = every session)")
+                    .desired_width(f32::INFINITY),
+            );
+            if browse.clicked() {
+                pick_dir(ui.ctx().clone(), team.name.clone(), &team.directory);
+            }
+        });
         ui.end_row();
         ui.label("Team rules");
         ui.add(
