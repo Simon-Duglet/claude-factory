@@ -109,11 +109,15 @@ pub struct TeamRole {
     /// The MCP servers the role's agents load, by name; None = every server Claude Code would load.
     #[serde(default)]
     pub mcp_servers: Option<Vec<String>>,
+    /// Restart the role's agents on a new session once a task they own is completed and they are idle,
+    /// so the next task doesn't pay for the old context.
+    #[serde(default)]
+    pub fresh_session: bool,
 }
 
 impl TeamRole {
     pub fn new(name: &str, prompt: &str) -> Self {
-        Self { name: name.into(), prompt: prompt.into(), model: String::new(), effort: String::new(), mcp_servers: None }
+        Self { name: name.into(), prompt: prompt.into(), model: String::new(), effort: String::new(), mcp_servers: None, fresh_session: false }
     }
 }
 
@@ -440,6 +444,7 @@ mod tests {
         let team: Team = serde_json::from_str(old).unwrap();
         assert_eq!((team.roles[0].model.as_str(), team.roles[0].effort.as_str(), team.lead_effort.as_str()), ("", "", ""));
         assert_eq!(team.roles[0].mcp_servers, None);
+        assert!(!team.roles[0].fresh_session);
     }
 
     #[test]

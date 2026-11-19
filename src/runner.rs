@@ -351,6 +351,12 @@ impl Agent {
         out
     }
 
+    /// Done with its turn, not waiting on a background task or on the user: safe to restart.
+    pub fn at_rest(&self) -> bool {
+        let shared = self.shared.lock().unwrap();
+        shared.status() == Status::Idle && shared.questions.is_empty() && shared.retry_at.is_none()
+    }
+
     /// Answers a pending question; `answers` maps each question's text to the chosen label(s) or the user's own text.
     pub fn answer(&self, request_id: &str, answers: serde_json::Map<String, Value>) {
         let mut shared = self.shared.lock().unwrap();

@@ -170,6 +170,9 @@ struct Factory {
     answers: HashMap<String, Vec<(Vec<bool>, String)>>,
     /// When each enabled routine fires next, by (team, routine name, schedule) so an edit reschedules it.
     routine_next: HashMap<(String, String, team::Schedule), i64>,
+    /// For agents whose role wants a fresh session per task: the completed tasks they owned when their session
+    /// started, by (team, agent). A completed task not in it ends the session.
+    finished_seen: HashMap<(String, String), std::collections::HashSet<String>>,
 }
 
 /// The chat panel's History mode: an agent's past conversations, and the one being read.
@@ -209,6 +212,7 @@ impl Factory {
             notifications: Vec::new(),
             answers: HashMap::new(),
             routine_next: HashMap::new(),
+            finished_seen: HashMap::new(),
         }
     }
 
@@ -237,6 +241,7 @@ impl Factory {
             }
             self.record_sessions();
             self.run_routines();
+            self.fresh_sessions();
             self.last_poll = Instant::now();
         }
     }
@@ -269,6 +274,48 @@ impl Factory {
         }
         // Drops disabled, renamed and rescheduled routines, so they start fresh when they come back.
         self.routine_next = live;
+    }
+
+    /// Restarts, on a new session under the same name, each agent whose role asks for a fresh session per task
+    /// once a task it owns is completed and it has finished its turn. Its chat stays on screen.
+    fn fresh_sessions(&mut self) {
+        let mut restart = Vec::new();
+        let mut lists: HashMap<String, Vec<tasks::Task>> = HashMap::new();
+        for ((team_name, name), agent) in &self.running {
+            let Some(team) = self.store.teams.iter().find(|t| t.name == *team_name) else { continue };
+            let Some(member) = team.members.iter().find(|m| m.name == *name) else { continue };
+            let key = (team_name.clone(), name.clone());
+            if !team.role_of(member).is_some_and(|r| r.fresh_session) {
+                self.finished_seen.remove(&key);
+                continue;
+            }
+            let tag = self.tags.get(team_name).cloned().unwrap_or_default();
+            let list = lists.entry(team_name.clone()).or_insert_with(|| tasks::read(&team.task_list_id()));
+            let done: std::collections::HashSet<String> = list
+                .iter()
+                .filter(|t| t.done() && t.owner.as_deref().is_some_and(|o| o == name || untag(o, &tag) == *name))
+                .map(|t| t.id.clone())
+                .collect();
+            let seen = self.finished_seen.entry(key.clone()).or_insert_with(|| done.clone());
+            if done.is_subset(seen) || !agent.at_rest() {
+                continue;
+            }
+            *seen = done;
+            restart.push(key);
+        }
+        for (team_name, name) in restart {
+            let Some(team) = self.store.teams.iter().find(|t| t.name == team_name) else { continue };
+            let tag = self.tags.get(&team_name).cloned().unwrap_or_else(new_tag);
+            let Some(old) = self.running.remove(&(team_name.clone(), name.clone())) else { continue };
+            let mut earlier = old.entries();
+            // Stop the old session first: two sessions must not share the name.
+            drop(old);
+            earlier.push(Entry::Tool("Task completed: new session for the next task (fresh session per task)".into()));
+            if let Some(agent) = start_seat(team, &name, &tag, None) {
+                agent.preload(earlier);
+                self.running.insert((team_name, name), agent);
+            }
+        }
     }
 
     /// Saves each running agent's session to the store's history, with its first message once it has one.
@@ -1069,6 +1116,10 @@ fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
                 pick(ui, ("role_model", i), &mut r.model, &MODELS, "lead's");
                 ui.label("Effort");
                 pick(ui, ("role_effort", i), &mut r.effort, &EFFORTS, "lead's");
+                ui.checkbox(&mut r.fresh_session, "Fresh session per task").on_hover_text(
+                    "When a task an agent in this role owns is completed and the agent is idle, restart it on a new session \
+                     (same name, same prompt) so the next task doesn't pay for the old context.",
+                );
                 if ui.button("Delete").clicked() {
                     remove = Some(i);
                 }
