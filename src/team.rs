@@ -37,12 +37,34 @@ pub struct Member {
     pub role: Role,
     /// Empty means the lead's model (`Team::lead_model`).
     pub model: String,
+    /// The member's own prompt, used when `override_prompt` is on.
     pub instructions: String,
+    /// The name of one of the team's roles (Roles tab); empty = the built-in `role`.
+    #[serde(default)]
+    pub team_role: String,
+    /// Use `instructions` instead of the role's prompt. Members saved before roles existed load with it on, keeping their text.
+    #[serde(default = "yes")]
+    pub override_prompt: bool,
 }
 
 impl Member {
     pub fn new(name: &str, role: Role) -> Self {
-        Self { name: name.into(), role, model: String::new(), instructions: role.default_instructions().into() }
+        Self { name: name.into(), role, model: String::new(), instructions: String::new(), team_role: String::new(), override_prompt: false }
+    }
+
+    /// What the member is called in prompts and the graph: its team role, else its built-in role.
+    pub fn role_label(&self) -> &str {
+        if self.team_role.trim().is_empty() { self.role.label() } else { self.team_role.trim() }
+    }
+
+    /// The prompt the member runs with: its own when overridden, else the team role of that name (a team role named
+    /// like a built-in one replaces it), else the built-in role's default.
+    pub fn prompt<'a>(&'a self, roles: &'a [TeamRole]) -> &'a str {
+        if self.override_prompt {
+            return &self.instructions;
+        }
+        let label = self.role_label();
+        roles.iter().find(|r| r.name.trim() == label).map_or(self.role.default_instructions(), |r| &r.prompt)
     }
 }
 
@@ -63,6 +85,15 @@ pub struct Team {
     /// Prompts the app sends to the lead on a schedule, while the app and the lead are running.
     #[serde(default)]
     pub routines: Vec<Routine>,
+    /// Named prompts the user keeps for this team; picking one fills in a teammate's instructions.
+    #[serde(default)]
+    pub roles: Vec<TeamRole>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TeamRole {
+    pub name: String,
+    pub prompt: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +166,7 @@ impl Team {
             members: Vec::new(),
             permission_mode: default_permission_mode(),
             routines: Vec::new(),
+            roles: Vec::new(),
         }
     }
 
@@ -256,6 +288,24 @@ fn write_atomic(path: &PathBuf, text: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn members_use_their_role_prompt_unless_overridden() {
+        // Saved before roles existed: no override_prompt field, so the member keeps its own text.
+        let old: Member = serde_json::from_str(r#"{"name":"A","role":"Developer","model":"","instructions":"mine"}"#).unwrap();
+        assert!(old.override_prompt);
+        assert_eq!(old.prompt(&[]), "mine");
+        let roles = vec![TeamRole { name: "Developer".into(), prompt: "team dev".into() }, TeamRole { name: "Writer".into(), prompt: "writes".into() }];
+        let mut m = Member::new("B", Role::Developer);
+        assert!(!m.override_prompt);
+        assert_eq!(m.prompt(&[]), Role::Developer.default_instructions());
+        assert_eq!(m.prompt(&roles), "team dev");
+        m.team_role = "Writer".into();
+        assert_eq!((m.role_label(), m.prompt(&roles)), ("Writer", "writes"));
+        m.override_prompt = true;
+        m.instructions = "own".into();
+        assert_eq!(m.prompt(&roles), "own");
+    }
 
     #[test]
     fn schedules_find_their_next_run() {

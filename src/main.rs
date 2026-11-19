@@ -29,6 +29,7 @@ type Running = HashMap<(String, String), Agent>;
 #[derive(PartialEq)]
 enum View {
     Design,
+    Roles,
     Chat,
 }
 
@@ -595,6 +596,7 @@ fn details_panel(ui: &mut egui::Ui, f: &mut Factory, messages: &mut Vec<(String,
     f.selected = f.selected.min(f.store.teams.len() - 1);
     ui.horizontal(|ui| {
         ui.selectable_value(&mut f.view, View::Design, egui::RichText::new("Design").heading());
+        ui.selectable_value(&mut f.view, View::Roles, egui::RichText::new("Roles").heading());
         ui.selectable_value(&mut f.view, View::Chat, egui::RichText::new("Chat").heading());
     });
     ui.separator();
@@ -615,6 +617,9 @@ fn details_panel(ui: &mut egui::Ui, f: &mut Factory, messages: &mut Vec<(String,
                 ui.add_space(8.0);
                 prompt_preview(ui, team);
             });
+        }
+        View::Roles => {
+            egui::ScrollArea::vertical().show(ui, |ui| roles_editor(ui, team));
         }
         View::Chat => {
             let chat = Chat { running: &mut f.running, tags: &mut f.tags, chat_with: &mut f.chat_with, draft: &mut f.draft, attachments: &mut f.attachments };
@@ -690,7 +695,7 @@ fn node_specs(team: &Team, running: &Running, sessions: &[&live::Session], tasks
         if let Some(task) = current(&m.name) {
             status = Some(format!("#{} {}", task.id, ellipsize(&task.subject, 22)));
         }
-        specs.push(NodeSpec { key: m.name.clone(), title: m.name.clone(), subtitle: subtitle(m.role.label(), status), state: st, is_lead: false, thumbnail: thumbnail(&m.name) });
+        specs.push(NodeSpec { key: m.name.clone(), title: m.name.clone(), subtitle: subtitle(m.role_label(), status), state: st, is_lead: false, thumbnail: thumbnail(&m.name) });
     }
     specs
 }
@@ -823,6 +828,31 @@ fn pick_file(save: bool, default_name: &str) -> Option<std::path::PathBuf> {
     (out.status.success() && !path.is_empty()).then(|| path.into())
 }
 
+/// Folder picked by `pick_dir`, as (team name, path), waiting for that team's editor to take it.
+static PICKED_DIR: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+fn take_picked_dir(team: &str) -> Option<String> {
+    let mut picked = PICKED_DIR.lock().unwrap();
+    if picked.as_ref().is_some_and(|(t, _)| t == team) { picked.take().map(|(_, dir)| dir) } else { None }
+}
+
+/// Opens a folder chooser on a thread so the UI keeps running; needs zenity or kdialog, like `pick_file`.
+fn pick_dir(ctx: egui::Context, team: String, current: &str) {
+    let start = if current.is_empty() { dirs::home_dir().unwrap_or_default().display().to_string() } else { current.to_string() };
+    std::thread::spawn(move || {
+        use std::process::Command;
+        let zenity = Command::new("zenity").args(["--file-selection", "--directory", "--filename"]).arg(format!("{start}/")).output();
+        let Ok(out) = zenity.or_else(|_| Command::new("kdialog").args(["--getexistingdirectory", &start]).output()) else {
+            return;
+        };
+        let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !dir.is_empty() {
+            *PICKED_DIR.lock().unwrap() = Some((team, dir));
+            ctx.request_repaint();
+        }
+    });
+}
+
 fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &mut bool) {
     egui::Grid::new("team").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Name");
@@ -838,11 +868,20 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
         });
         ui.end_row();
         ui.label("Directory");
-        ui.add(
-            egui::TextEdit::singleline(&mut team.directory)
-                .hint_text("Only sessions started in this folder get the team (empty = every session)")
-                .desired_width(f32::INFINITY),
-        );
+        ui.horizontal(|ui| {
+            if let Some(dir) = take_picked_dir(&team.name) {
+                team.directory = dir;
+            }
+            let browse = ui.button("Browse…").on_hover_text("Choose the folder");
+            ui.add(
+                egui::TextEdit::singleline(&mut team.directory)
+                    .hint_text("Only sessions started in this folder get the team (empty = every session)")
+                    .desired_width(f32::INFINITY),
+            );
+            if browse.clicked() {
+                pick_dir(ui.ctx().clone(), team.name.clone(), &team.directory);
+            }
+        });
         ui.end_row();
         ui.label("Lead model");
         ui.horizontal(|ui| {
@@ -915,21 +954,36 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
     let mut remove = None;
     let mut swap = None;
     let last = team.members.len().saturating_sub(1);
+    let team_roles = team.roles.clone();
     for (i, m) in team.members.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(140.0));
                 ui.label("Role");
-                let before = m.role;
-                egui::ComboBox::from_id_salt(("role", i)).selected_text(m.role.label()).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("role", i)).selected_text(m.role_label().to_string()).show_ui(ui, |ui| {
                     for r in Role::ALL {
-                        ui.selectable_value(&mut m.role, r, r.label());
+                        if ui.selectable_label(m.team_role.is_empty() && m.role == r, r.label()).clicked() {
+                            m.role = r;
+                            m.team_role.clear();
+                        }
+                    }
+                    // Team roles named like a built-in one already apply through it.
+                    for r in team_roles.iter().filter(|r| !r.name.trim().is_empty() && !Role::ALL.iter().any(|b| b.label() == r.name.trim())) {
+                        if ui.selectable_label(m.team_role == r.name.trim(), r.name.trim()).clicked() {
+                            m.role = Role::Custom;
+                            m.team_role = r.name.trim().to_string();
+                        }
                     }
                 });
-                // Swap in the new role's default text unless the user wrote their own.
-                if m.role != before && m.instructions == before.default_instructions() {
-                    m.instructions = m.role.default_instructions().into();
+                let was = m.override_prompt;
+                ui.checkbox(&mut m.override_prompt, "Override role prompt")
+                    .on_hover_text("On: this agent uses its own prompt below. Off: it uses its role's prompt from the Roles tab, and follows its edits.");
+                // Start the custom prompt from the role's, unless the agent already has one of its own.
+                if m.override_prompt && !was && m.instructions.trim().is_empty() {
+                    m.override_prompt = false;
+                    m.instructions = m.prompt(&team_roles).to_string();
+                    m.override_prompt = true;
                 }
                 ui.label("Model");
                 let shown = if m.model.is_empty() { "lead's model".to_string() } else { m.model.clone() };
@@ -949,12 +1003,17 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
                     remove = Some(i);
                 }
             });
-            ui.add(
-                egui::TextEdit::multiline(&mut m.instructions)
-                    .hint_text("What this agent does and must not do")
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY),
-            );
+            if m.override_prompt {
+                ui.add(
+                    egui::TextEdit::multiline(&mut m.instructions)
+                        .hint_text("What this agent does and must not do")
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+            } else {
+                let mut shown = m.prompt(&team_roles).to_string();
+                ui.add_enabled(false, egui::TextEdit::multiline(&mut shown).hint_text("This role has no prompt").desired_rows(2).desired_width(f32::INFINITY));
+            }
         });
     }
     if let Some(i) = swap {
@@ -967,6 +1026,63 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
         for role in Role::ALL {
             if ui.button(format!("+ {}", role.label())).clicked() {
                 add_member(team, Member::new(&format!("{} {}", role.label(), team.members.len() + 1), role));
+            }
+        }
+        for r in team_roles.iter().filter(|r| !r.name.trim().is_empty() && !Role::ALL.iter().any(|b| b.label() == r.name.trim())) {
+            if ui.button(format!("+ {}", r.name.trim())).clicked() {
+                let mut m = Member::new(&format!("{} {}", r.name.trim(), team.members.len() + 1), Role::Custom);
+                m.team_role = r.name.trim().to_string();
+                add_member(team, m);
+            }
+        }
+    });
+}
+
+fn roles_editor(ui: &mut egui::Ui, team: &mut Team) {
+    ui.heading("Roles");
+    ui.weak("Default prompts for this team's agents. An agent uses its role's prompt here, and follows edits to it, unless \"Override role prompt\" is ticked on it in Design. A role named Developer, QA or Reviewer replaces that built-in role's prompt.");
+    let mut remove = None;
+    let mut renamed = None;
+    for (i, r) in team.roles.iter_mut().enumerate() {
+        let before = r.name.trim().to_string();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(180.0));
+                if r.name.trim() != before {
+                    renamed = Some((before.clone(), r.name.trim().to_string()));
+                }
+                if ui.button("Delete").clicked() {
+                    remove = Some(i);
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut r.prompt)
+                    .hint_text("The default prompt: what an agent in this role does and must not do")
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+    // Agents follow their role across a rename.
+    if let Some((old, new)) = renamed {
+        for m in team.members.iter_mut().filter(|m| !old.is_empty() && m.team_role == old) {
+            m.team_role = new.clone();
+        }
+    }
+    if let Some(i) = remove {
+        team.roles.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("+ Role").clicked() {
+            team.roles.push(team::TeamRole { name: format!("Role {}", team.roles.len() + 1), prompt: String::new() });
+        }
+        // Starting points: copies of the built-in roles, skipped once a role of that name exists.
+        for builtin in Role::ALL.into_iter().filter(|r| *r != Role::Custom) {
+            if !team.roles.iter().any(|r| r.name == builtin.label())
+                && ui.button(format!("+ {}", builtin.label())).on_hover_text("Copy the built-in role").clicked()
+            {
+                team.roles.push(team::TeamRole { name: builtin.label().into(), prompt: builtin.default_instructions().into() });
             }
         }
     });
