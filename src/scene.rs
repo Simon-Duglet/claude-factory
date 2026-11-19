@@ -22,17 +22,31 @@ pub enum NodeState {
 }
 
 impl NodeState {
-    fn color(self) -> LinearRgba {
-        let c = match self {
-            NodeState::Off => Srgba::rgb(0.32, 0.34, 0.40),
-            NodeState::Starting => Srgba::rgb(0.40, 0.62, 0.95),
-            NodeState::Working => Srgba::rgb(0.30, 0.82, 0.48),
-            NodeState::Idle => Srgba::rgb(0.95, 0.68, 0.22),
-            NodeState::Done => Srgba::rgb(0.38, 0.52, 0.92),
-            NodeState::Failed => Srgba::rgb(0.92, 0.32, 0.32),
-        };
-        c.into()
+    /// The state's colour as sRGB bytes: the same hues on every theme, deeper on a light one so they stay readable.
+    pub fn rgb(self, dark: bool) -> [u8; 3] {
+        match (self, dark) {
+            (NodeState::Off, true) => [82, 87, 102],
+            (NodeState::Starting, true) => [102, 158, 242],
+            (NodeState::Working, true) => [77, 209, 122],
+            (NodeState::Idle, true) => [242, 173, 56],
+            (NodeState::Done, true) => [98, 133, 235],
+            (NodeState::Failed, true) => [235, 82, 82],
+            (NodeState::Off, false) => [138, 145, 160],
+            (NodeState::Starting, false) => [38, 110, 222],
+            (NodeState::Working, false) => [28, 150, 76],
+            (NodeState::Idle, false) => [206, 128, 8],
+            (NodeState::Done, false) => [66, 92, 200],
+            (NodeState::Failed, false) => [206, 48, 48],
+        }
     }
+
+    fn color(self, dark: bool) -> LinearRgba {
+        srgb(self.rgb(dark)).into()
+    }
+}
+
+fn srgb([r, g, b]: [u8; 3]) -> Srgba {
+    Srgba::rgb_u8(r, g, b)
 }
 
 pub struct NodeSpec {
@@ -56,32 +70,127 @@ pub struct SceneInput {
     pub theme: Theme,
 }
 
-/// The scene's background: a clear colour and the particles drawn behind the graph.
+/// The app's look: the scene's background and particles, and the palette the scene and the egui panels draw from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
     #[default]
     Starfield,
     Fireflies,
     Snowfall,
+    Daylight,
+}
+
+/// A theme's colours as sRGB bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Palette {
+    pub dark: bool,
+    /// The scene's background.
+    pub canvas: [u8; 3],
+    pub panel: [u8; 3],
+    /// Popups and menus.
+    pub window: [u8; 3],
+    /// Text fields and other sunken areas.
+    pub field: [u8; 3],
+    /// Stripes, group frames and code.
+    pub faint: [u8; 3],
+    /// Buttons, and buttons under the pointer.
+    pub widget: [u8; 3],
+    pub hover: [u8; 3],
+    /// Strong text and the scene's names.
+    pub text: [u8; 3],
+    pub body: [u8; 3],
+    pub weak: [u8; 3],
+    /// Links, selection and the user's own messages.
+    pub accent: [u8; 3],
+    /// Separators and borders.
+    pub line: [u8; 3],
+    /// The scene's idle connector lines.
+    pub link: [u8; 3],
 }
 
 impl Theme {
-    pub const ALL: [Theme; 3] = [Theme::Starfield, Theme::Fireflies, Theme::Snowfall];
+    pub const ALL: [Theme; 4] = [Theme::Starfield, Theme::Fireflies, Theme::Snowfall, Theme::Daylight];
 
     pub fn label(self) -> &'static str {
         match self {
             Theme::Starfield => "Starfield",
             Theme::Fireflies => "Fireflies",
             Theme::Snowfall => "Snowfall",
+            Theme::Daylight => "Daylight",
+        }
+    }
+
+    pub fn palette(self) -> Palette {
+        match self {
+            Theme::Starfield => Palette {
+                dark: true,
+                canvas: [9, 10, 18],
+                panel: [21, 23, 33],
+                window: [26, 28, 40],
+                field: [12, 13, 21],
+                faint: [30, 33, 46],
+                widget: [42, 46, 62],
+                hover: [58, 63, 84],
+                text: [228, 231, 240],
+                body: [176, 181, 196],
+                weak: [128, 134, 154],
+                accent: [110, 155, 240],
+                line: [60, 65, 84],
+                link: [170, 177, 195],
+            },
+            Theme::Fireflies => Palette {
+                dark: true,
+                canvas: [8, 14, 10],
+                panel: [17, 26, 20],
+                window: [22, 33, 26],
+                field: [10, 17, 12],
+                faint: [26, 38, 30],
+                widget: [37, 52, 41],
+                hover: [52, 72, 57],
+                text: [226, 236, 228],
+                body: [172, 188, 176],
+                weak: [124, 145, 130],
+                accent: [232, 190, 84],
+                line: [48, 66, 54],
+                link: [168, 186, 170],
+            },
+            Theme::Snowfall => Palette {
+                dark: true,
+                canvas: [15, 18, 26],
+                panel: [27, 31, 42],
+                window: [33, 38, 51],
+                field: [18, 21, 30],
+                faint: [37, 42, 56],
+                widget: [50, 57, 75],
+                hover: [66, 75, 98],
+                text: [232, 237, 246],
+                body: [182, 190, 206],
+                weak: [134, 143, 164],
+                accent: [140, 182, 238],
+                line: [62, 70, 90],
+                link: [176, 184, 202],
+            },
+            Theme::Daylight => Palette {
+                dark: false,
+                canvas: [236, 239, 244],
+                panel: [248, 249, 251],
+                window: [255, 255, 255],
+                field: [255, 255, 255],
+                faint: [238, 240, 245],
+                widget: [226, 230, 237],
+                hover: [212, 218, 228],
+                text: [22, 26, 36],
+                body: [52, 58, 72],
+                weak: [104, 111, 128],
+                accent: [32, 98, 200],
+                line: [205, 210, 220],
+                link: [132, 140, 158],
+            },
         }
     }
 
     fn clear(self) -> Color {
-        match self {
-            Theme::Starfield => Color::srgb(0.035, 0.04, 0.07),
-            Theme::Fireflies => Color::srgb(0.03, 0.055, 0.04),
-            Theme::Snowfall => Color::srgb(0.06, 0.07, 0.10),
-        }
+        srgb(self.palette().canvas).into()
     }
 
     /// Where particle `unit` (in -0.5..0.5) with seed `phase` sits at time `t`, in the same unit square, and how it looks.
@@ -99,6 +208,11 @@ impl Theme {
             Theme::Snowfall => {
                 let p = Vec2::new(wrap(unit.x + 0.015 * (t * 0.6 * speed + phase).sin()), wrap(unit.y - t * 0.02 * speed));
                 (p, 0.8 + 0.6 * speed, Color::srgba(0.85, 0.9, 1.0, 0.2 + 0.25 * speed / 1.5))
+            }
+            Theme::Daylight => {
+                // Dust motes rising slowly through a sunlit room.
+                let p = Vec2::new(wrap(unit.x + 0.01 * (t * 0.4 * speed + phase).sin()), wrap(unit.y + t * 0.008 * speed));
+                (p, 0.9 + 0.5 * speed, Color::srgba(0.35, 0.45, 0.65, 0.12 + 0.12 * (t * 0.9 + phase).sin().abs()))
             }
         }
     }
@@ -132,6 +246,41 @@ struct Node {
 
 #[derive(Component)]
 struct Halo;
+
+/// The light ring between a node's core and its halo.
+#[derive(Component)]
+struct Ring;
+
+fn ring_color(palette: &Palette) -> Color {
+    srgb(palette.text).with_alpha(0.85).into()
+}
+
+/// Recolours the existing nodes' rings and labels when the theme changes; new nodes are spawned in its colours.
+fn restyle(
+    input: Res<SceneInput>,
+    mut shown: Local<Option<Theme>>,
+    rings: Query<&MeshMaterial2d<ColorMaterial>, With<Ring>>,
+    mut labels: Query<(&Label, &mut TextColor)>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    if *shown == Some(input.theme) {
+        return;
+    }
+    *shown = Some(input.theme);
+    let palette = input.theme.palette();
+    for ring in &rings {
+        if let Some(mut m) = materials.get_mut(&ring.0) {
+            m.color = ring_color(&palette);
+        }
+    }
+    for (label, mut color) in &mut labels {
+        color.0 = match label {
+            Label::Initials => Color::WHITE,
+            Label::Title => srgb(palette.text).into(),
+            Label::Subtitle => srgb(palette.weak).into(),
+        };
+    }
+}
 
 /// The thumbnail sprite under a node, and the snapshot it currently shows.
 #[derive(Component, Default)]
@@ -191,7 +340,7 @@ impl Plugin for ScenePlugin {
                 DefaultGizmoConfigGroup,
                 GizmoConfig { line: GizmoLineConfig { width: 2.0, joints: GizmoLineJoint::Miter, ..default() }, ..default() },
             )
-            .add_systems(Update, (pointer, fit_camera, sync_nodes, animate_nodes, spawn_orbs, animate_effects, draw).chain());
+            .add_systems(Update, (pointer, fit_camera, sync_nodes, restyle, animate_nodes, spawn_orbs, animate_effects, draw).chain());
     }
 }
 
@@ -332,7 +481,8 @@ fn sync_nodes(
             continue;
         }
         let radius = if spec.is_lead { LEAD_RADIUS } else { RADIUS };
-        let color = spec.state.color();
+        let palette = input.theme.palette();
+        let color = spec.state.color(palette.dark);
         let core = materials.add(ColorMaterial::from_color(Color::from(color)));
         let halo = materials.add(ColorMaterial::from_color(Color::from(color.with_alpha(0.0))));
         commands
@@ -355,7 +505,8 @@ fn sync_nodes(
                 p.spawn((Halo, Mesh2d(meshes.add(Circle::new(radius * 1.5))), MeshMaterial2d(halo), Transform::from_xyz(0.0, 0.0, -0.2)));
                 p.spawn((
                     Mesh2d(meshes.add(Circle::new(radius + 3.0))),
-                    MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::srgba(1.0, 1.0, 1.0, 0.85)))),
+                    Ring,
+                    MeshMaterial2d(materials.add(ColorMaterial::from_color(ring_color(&palette)))),
                     Transform::from_xyz(0.0, 0.0, -0.1),
                 ));
                 p.spawn((Core, Mesh2d(meshes.add(Circle::new(radius))), MeshMaterial2d(core), Transform::default()));
@@ -370,14 +521,14 @@ fn sync_nodes(
                     Label::Title,
                     Text2d::new(spec.title.clone()),
                     TextFont { font_size: FontSize::Px(17.0), ..default() },
-                    TextColor(Color::srgb(0.92, 0.93, 0.96)),
+                    TextColor(srgb(palette.text).into()),
                     Transform::from_xyz(0.0, -radius - 20.0, 0.5),
                 ));
                 p.spawn((
                     Label::Subtitle,
                     Text2d::new(spec.subtitle.clone()),
                     TextFont { font_size: FontSize::Px(13.0), ..default() },
-                    TextColor(Color::srgb(0.60, 0.63, 0.70)),
+                    TextColor(srgb(palette.weak).into()),
                     Transform::from_xyz(0.0, -radius - 40.0, 0.5),
                 ));
                 p.spawn((Preview::default(), Sprite::default(), Visibility::Hidden, Transform::from_xyz(0.0, -radius - 54.0, 0.6)));
@@ -428,7 +579,7 @@ fn animate_nodes(
         let grow = 1.0 + node.hover * 0.08 + if selected { 0.06 } else { 0.0 };
         transform.scale = Vec3::splat(ease_out_back(node.appear).max(0.01) * grow);
 
-        let target_color = node.state.color();
+        let target_color = node.state.color(input.theme.palette().dark);
         node.color = lerp_color(node.color, target_color, 1.0 - (-dt * 4.0).exp());
         if let Some(mut core) = materials.get_mut(&node.core) {
             core.color = Color::from(node.color);
@@ -456,11 +607,14 @@ fn node_pos(nodes: &Query<(&Node, &Transform)>, key: &str) -> Option<(Vec2, Line
 }
 
 fn spawn_orbs(mut input: ResMut<SceneInput>, mut effects: ResMut<Effects>, nodes: Query<(&Node, &Transform)>) {
+    let palette = input.theme.palette();
+    // Toward the text colour: lighter on a dark theme, deeper on a light one, so orbs stand out from the lines.
+    let text: LinearRgba = srgb(palette.text).into();
     for (from, to) in std::mem::take(&mut input.messages) {
         let color = if from == YOU {
-            Srgba::rgb(0.55, 0.75, 1.0).into()
+            srgb(palette.accent).into()
         } else {
-            node_pos(&nodes, &from).map_or(Srgba::rgb(1.0, 0.85, 0.4).into(), |(_, c)| lerp_color(c, LinearRgba::WHITE, 0.35))
+            node_pos(&nodes, &from).map_or(NodeState::Idle.color(palette.dark), |(_, c)| lerp_color(c, text, 0.3))
         };
         effects.orbs.push(Orb { from, to, t: 0.0, color });
     }
@@ -635,6 +789,8 @@ fn draw(
 ) {
     let t = time.elapsed_secs();
     let size = view_size(&camera, &zoom);
+    let palette = input.theme.palette();
+    let text = srgb(palette.text);
 
     if clear_color.0 != input.theme.clear() {
         clear_color.0 = input.theme.clear();
@@ -653,7 +809,7 @@ fn draw(
     let lead = nodes.iter().find(|(n, _)| n.is_lead);
     if let (Some((lead, lead_t)), Some(bus)) = (lead, bus_y(&nodes)) {
         let start = lead_t.translation.truncate() - Vec2::Y * LEAD_PORT;
-        let idle = LinearRgba::new(0.42, 0.45, 0.55, 0.75);
+        let idle = LinearRgba::from(srgb(palette.link)).with_alpha(0.75);
         // Every member's elbow shares the trunk and the bus, so the idle lines go first and busy ones on top.
         let mut links: Vec<(&Node, Vec<Vec2>, bool)> = nodes
             .iter()
@@ -690,10 +846,10 @@ fn draw(
         }
         if input.selected == node.key {
             let pulse = 0.5 + 0.5 * (t * 3.0).sin();
-            gizmos.circle_2d(p, radius + 12.0 + pulse * 2.0, Color::srgba(1.0, 1.0, 1.0, 0.55 + 0.3 * pulse));
+            gizmos.circle_2d(p, radius + 12.0 + pulse * 2.0, text.with_alpha(0.55 + 0.3 * pulse));
         }
         if node.hover > 0.01 {
-            gizmos.circle_2d(p, radius + 7.0, Color::srgba(1.0, 1.0, 1.0, 0.35 * node.hover));
+            gizmos.circle_2d(p, radius + 7.0, text.with_alpha(0.35 * node.hover));
         }
     }
 

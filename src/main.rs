@@ -38,8 +38,44 @@ enum View {
 const MODELS: [&str; 4] = ["", "opus", "sonnet", "haiku"];
 /// `claude --effort` levels; "" = no flag.
 const EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
-const IDLE: Color32 = Color32::from_rgb(242, 173, 56);
-const FAILED: Color32 = Color32::from_rgb(235, 82, 82);
+
+/// An agent state's colour, readable on the current theme's panels.
+fn state_color(ui: &egui::Ui, state: NodeState) -> Color32 {
+    let [r, g, b] = state.rgb(ui.visuals().dark_mode);
+    Color32::from_rgb(r, g, b)
+}
+
+fn rgb([r, g, b]: [u8; 3]) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+/// egui's look for a theme: its dark or light base, recoloured with the theme's palette.
+fn theme_visuals(theme: scene::Theme) -> egui::Visuals {
+    let p = theme.palette();
+    let mut v = if p.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    v.text_options.subpixel_binning = false;
+    v.panel_fill = rgb(p.panel);
+    v.window_fill = rgb(p.window);
+    v.window_stroke.color = rgb(p.line);
+    v.extreme_bg_color = rgb(p.field);
+    v.faint_bg_color = rgb(p.faint);
+    v.code_bg_color = rgb(p.faint);
+    v.hyperlink_color = rgb(p.accent);
+    v.weak_text_color = Some(rgb(p.weak));
+    v.selection.bg_fill = rgb(p.panel).lerp_to_gamma(rgb(p.accent), if p.dark { 0.45 } else { 0.3 });
+    v.selection.stroke.color = rgb(p.text);
+    v.text_cursor.stroke.color = rgb(p.accent);
+    let w = &mut v.widgets;
+    for (state, fill) in [(&mut w.noninteractive, p.panel), (&mut w.inactive, p.widget), (&mut w.hovered, p.hover), (&mut w.active, p.hover), (&mut w.open, p.widget)] {
+        state.bg_fill = rgb(fill);
+        state.weak_bg_fill = rgb(fill);
+        state.fg_stroke.color = rgb(p.body);
+    }
+    w.noninteractive.bg_stroke.color = rgb(p.line);
+    w.hovered.fg_stroke.color = rgb(p.text);
+    w.active.fg_stroke.color = rgb(p.text);
+    v
+}
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("session-start") {
@@ -364,9 +400,17 @@ fn ui_system(
     mut output: ResMut<SceneOutput>,
     mut camera: Single<&mut Camera, With<SceneCamera>>,
     window: Single<&Window, With<PrimaryWindow>>,
+    mut styled: Local<Option<scene::Theme>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
     let f = &mut *factory;
+    if *styled != Some(f.store.theme) {
+        *styled = Some(f.store.theme);
+        let visuals = theme_visuals(f.store.theme);
+        let mode = if visuals.dark_mode { egui::Theme::Dark } else { egui::Theme::Light };
+        ctx.set_visuals_of(mode, visuals);
+        ctx.set_theme(mode);
+    }
     f.poll_live();
     let delivered = route_messages(&f.running, &f.tags);
     for ((team, _), agent) in &f.running {
@@ -395,7 +439,7 @@ fn ui_system(
                 ui.heading("Claude Factory");
                 ui.separator();
                 if f.installed {
-                    ui.colored_label(Color32::LIGHT_GREEN, "Claude is set up: agent teams on, team-factory mod loaded");
+                    ui.colored_label(state_color(ui, NodeState::Working), "Claude is set up: agent teams on, team-factory mod loaded");
                 } else if ui
                     .button("Retry Claude setup")
                     .on_hover_text(format!(
@@ -523,18 +567,19 @@ fn ui_system(
 
 fn legend(ctx: &egui::Context, rect: egui::Rect, empty: bool) {
     let items = [
-        ("not started", Color32::from_rgb(82, 87, 102)),
-        ("starting", Color32::from_rgb(102, 158, 242)),
-        ("working", Color32::from_rgb(77, 209, 122)),
-        ("idle", IDLE),
-        ("stopped", FAILED),
+        ("not started", NodeState::Off),
+        ("starting", NodeState::Starting),
+        ("working", NodeState::Working),
+        ("idle", NodeState::Idle),
+        ("stopped", NodeState::Failed),
     ];
     // Painted dots: the default egui font has no bullet glyph.
     egui::Area::new("legend".into())
         .fixed_pos(rect.left_bottom() + egui::vec2(14.0, -22.0 * items.len() as f32 - 8.0))
         .interactable(false)
         .show(ctx, |ui| {
-            for (label, color) in items {
+            for (label, state) in items {
+                let color = state_color(ui, state);
                 ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot.center(), 4.5, color);
@@ -604,7 +649,7 @@ fn question_card(ui: &mut egui::Ui, agent: &str, input: &serde_json::Value, pick
     let questions = input["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
     picks.resize_with(questions.len(), Default::default);
     let mut submit = false;
-    egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, Color32::from_rgb(230, 180, 80))).show(ui, |ui| {
+    egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, state_color(ui, NodeState::Idle))).show(ui, |ui| {
         ui.strong(format!("{agent} asks"));
         for (q, (ticked, other)) in questions.iter().zip(picks.iter_mut()) {
             let options = q["options"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -798,16 +843,16 @@ fn task_panel(ui: &mut egui::Ui, f: &mut Factory) {
             let blocked = !task.blocked_by.is_empty()
                 && task.blocked_by.iter().any(|b| f.tasks.iter().any(|t| &t.id == b && !t.done()));
             let (icon, color) = if task.in_progress() {
-                ("", Color32::from_rgb(77, 209, 122))
+                ("", state_color(ui, NodeState::Working))
             } else if task.done() {
-                ("✔", Color32::from_rgb(98, 133, 235))
+                ("✔", state_color(ui, NodeState::Done))
             } else if blocked {
-                ("⏸", Color32::GRAY)
+                ("⏸", ui.visuals().weak_text_color())
             } else {
-                ("○", IDLE)
+                ("○", state_color(ui, NodeState::Idle))
             };
             let frame = egui::Frame::group(ui.style()).fill(if task.in_progress() {
-                Color32::from_rgba_unmultiplied(77, 209, 122, 22)
+                state_color(ui, NodeState::Working).gamma_multiply(0.09)
             } else {
                 Color32::TRANSPARENT
             });
@@ -1810,24 +1855,26 @@ fn untag(text: &str, tag: &str) -> String {
     text.replace(&format!("-{tag}"), "")
 }
 
-/// egui's dark theme draws body text mid-gray (140) and weak text darker still, which is hard to read in a long chat.
-/// Makes both brighter for this ui and its children only; the rest of the app keeps the default look.
+/// Gives a long chat the theme's strongest text, and weak text halfway to it, for this ui and its children only.
 fn brighten_chat_text(ui: &mut egui::Ui) {
     let visuals = &mut ui.style_mut().visuals;
-    visuals.widgets.noninteractive.fg_stroke.color = Color32::from_gray(225);
-    visuals.weak_text_color = Some(Color32::from_gray(170));
+    let strong = visuals.strong_text_color();
+    visuals.weak_text_color = Some(visuals.weak_text_color().lerp_to_gamma(strong, 0.3));
+    visuals.widgets.noninteractive.fg_stroke.color = strong;
 }
 
-/// Low-opacity blue behind the user's own messages, matching the color of their "You" label.
-const USER_MESSAGE_BG: Color32 = Color32::from_rgba_premultiplied(15, 21, 29, 32);
+/// The theme's accent: the "You" label, and faintly behind the user's own messages.
+fn you_color(ui: &egui::Ui) -> Color32 {
+    ui.visuals().hyperlink_color
+}
 
 fn chat_entry(ui: &mut egui::Ui, agent: &str, entry: &Entry, tag: &str) {
     if let Entry::User(text) = entry {
         let clean = if tag.is_empty() { text.clone() } else { untag(text, tag) };
         ui.add_space(4.0);
-        egui::Frame::new().fill(USER_MESSAGE_BG).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+        egui::Frame::new().fill(you_color(ui).gamma_multiply(0.12)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.colored_label(Color32::from_rgb(120, 170, 230), egui::RichText::new("You").strong());
+            ui.colored_label(you_color(ui), egui::RichText::new("You").strong());
             copy_menu(markdown::show(ui, &clean), clean.clone());
         });
         return;
@@ -1835,20 +1882,20 @@ fn chat_entry(ui: &mut egui::Ui, agent: &str, entry: &Entry, tag: &str) {
     // Agents write each other's tagged session names; the user only knows the plain ones.
     let clean = |t: &str| if tag.is_empty() { t.to_string() } else { untag(t, tag) };
     let (who, color, text) = match entry {
-        Entry::User(t) => ("You", Color32::from_rgb(120, 170, 230), t.as_str()),
+        Entry::User(t) => ("You", you_color(ui), t.as_str()),
         Entry::Incoming { from, text } => {
             ui.add_space(4.0);
-            ui.colored_label(IDLE, egui::RichText::new(format!("From {}", clean(from))).strong());
+            ui.colored_label(state_color(ui, NodeState::Idle), egui::RichText::new(format!("From {}", clean(from))).strong());
             copy_menu(markdown::show(ui, &clean(text)), clean(text));
             return;
         }
-        Entry::Assistant(t) => (agent, Color32::from_rgb(140, 200, 140), t.as_str()),
+        Entry::Assistant(t) => (agent, state_color(ui, NodeState::Working), t.as_str()),
         Entry::Tool(t) => {
             let weak = ui.visuals().weak_text_color();
             copy_menu(links::label(ui, &format!("  ⚙ {}", clean(t)), Some(weak)), clean(t));
             return;
         }
-        Entry::Error(t) => ("Error", FAILED, t.as_str()),
+        Entry::Error(t) => ("Error", state_color(ui, NodeState::Failed), t.as_str()),
     };
     ui.add_space(4.0);
     ui.colored_label(color, egui::RichText::new(who).strong());
@@ -2045,7 +2092,7 @@ fn usage_panel(ui: &mut egui::Ui) {
         let used = e.used_credits.unwrap_or(0.0);
         rows.push(("Usage credits", format!("{} of {}", dollars(used / 100.0), dollars(limit / 100.0)), (used / limit) as f32));
     }
-    let blue = Color32::from_rgb(0x4a, 0x90, 0xe2);
+    let blue = ui.visuals().hyperlink_color;
     ui.add_space(4.0);
     for (name, detail, frac) in rows.iter().rev() {
         ui.add_space(4.0);
