@@ -478,8 +478,14 @@ fn ui_system(
         .default_size(470.0)
         .size_range(340.0..=760.0)
         .show(&mut root, |ui| {
-            details_panel(ui, f, &mut scene.messages);
-            ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::hover());
+            // Laid out in a child that the panel does not size itself from: a row wider than the panel would
+            // otherwise grow the panel's rect past its edge, so egui drew its resize line inside the content and the
+            // scene got a viewport sized for that wider panel.
+            let rect = ui.available_rect_before_wrap();
+            let mut inner = ui.new_child(UiBuilder::new().id_salt("details").max_rect(rect));
+            inner.set_clip_rect(rect.intersect(ui.clip_rect()));
+            details_panel(&mut inner, f, &mut scene.messages);
+            ui.allocate_rect(rect, egui::Sense::hover());
         })
         .response
         .rect
@@ -906,11 +912,17 @@ fn pick_dir(ctx: egui::Context, team: String, current: &str) {
     });
 }
 
+/// A grid cell whose widgets wrap onto more lines when the panel is narrow. Straight in a grid, a wrapped row
+/// overlaps the next one: the vertical scope makes the grid see its full height.
+fn wrapped_cell(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.vertical(|ui| ui.horizontal_wrapped(add));
+}
+
 fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &mut bool) {
     egui::Grid::new("team").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
         ui.label("Name");
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut team.name);
+        wrapped_cell(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut team.name).desired_width(160.0));
             ui.checkbox(&mut team.enabled, "Send at session start");
             if ui.button("Export…").on_hover_text("Save this team to a JSON file").clicked() {
                 *export = true;
@@ -937,7 +949,7 @@ fn team_editor(ui: &mut egui::Ui, team: &mut Team, delete: &mut bool, export: &m
         });
         ui.end_row();
         ui.label("Lead model");
-        ui.horizontal(|ui| {
+        wrapped_cell(ui, |ui| {
             let shown = if team.lead_model.is_empty() { "default" } else { team.lead_model.as_str() };
             egui::ComboBox::from_id_salt("lead_model").selected_text(shown).show_ui(ui, |ui| {
                 for model in MODELS {
@@ -1012,7 +1024,8 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
     let team_roles = team.roles.clone();
     for (i, m) in team.members.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            // Wraps onto a second line when the panel is narrow.
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(140.0));
                 ui.label("Role");
@@ -1074,7 +1087,7 @@ fn members_editor(ui: &mut egui::Ui, team: &mut Team) {
     if let Some(i) = remove {
         team.members.remove(i);
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for role in Role::ALL {
             if ui.button(format!("+ {}", role.label())).clicked() {
                 add_member(team, Member::new(&format!("{} {}", role.label(), team.members.len() + 1), role));
@@ -1192,7 +1205,7 @@ fn routines_editor(ui: &mut egui::Ui, team: &mut Team) {
     let mut remove = None;
     for (i, r) in team.routines.iter_mut().enumerate() {
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(140.0));
                 ui.checkbox(&mut r.enabled, "Enabled");
@@ -1201,7 +1214,7 @@ fn routines_editor(ui: &mut egui::Ui, team: &mut Team) {
                     remove = Some(i);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let every = matches!(r.schedule, Schedule::Every { .. });
                 egui::ComboBox::from_id_salt(("schedule", i)).selected_text(if every { "Every" } else { "Daily at" }).show_ui(ui, |ui| {
                     if ui.selectable_label(every, "Every").clicked() && !every {
@@ -1270,7 +1283,8 @@ fn prompt_preview(ui: &mut egui::Ui, team: &Team) {
             ui.ctx().copy_text(text.clone());
         }
     });
-    ui.add(egui::TextEdit::multiline(&mut text).code_editor().interactive(false).desired_width(f32::INFINITY));
+    // Wrapped to the panel: a long line no longer runs under the Tasks panel.
+    ui.add(egui::TextEdit::multiline(&mut text).code_editor().interactive(false).desired_width(ui.available_width()));
 }
 
 /// The chat panel's share of the app state.
