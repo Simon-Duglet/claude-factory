@@ -106,11 +106,14 @@ pub struct TeamRole {
     /// Default `--effort` of the role's agents; empty = the lead's.
     #[serde(default)]
     pub effort: String,
+    /// The MCP servers the role's agents load, by name; None = every server Claude Code would load.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 impl TeamRole {
     pub fn new(name: &str, prompt: &str) -> Self {
-        Self { name: name.into(), prompt: prompt.into(), model: String::new(), effort: String::new() }
+        Self { name: name.into(), prompt: prompt.into(), model: String::new(), effort: String::new(), mcp_servers: None }
     }
 }
 
@@ -436,6 +439,7 @@ mod tests {
         let old = r#"{"name":"Old","enabled":true,"directory":"","rules":"","members":[],"roles":[{"name":"QA","prompt":"p"}]}"#;
         let team: Team = serde_json::from_str(old).unwrap();
         assert_eq!((team.roles[0].model.as_str(), team.roles[0].effort.as_str(), team.lead_effort.as_str()), ("", "", ""));
+        assert_eq!(team.roles[0].mcp_servers, None);
     }
 
     #[test]
